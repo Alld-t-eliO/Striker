@@ -1,102 +1,86 @@
 Screen {
-    background: #05070B;
-    color: #00F6FF;
+    background: #0a0a12;
+    color: #c8c8d8;
 }
 
 #banner {
-    height: 9;
-    content-align: center middle;
-    color: #00F6FF;
+    color: #00e5ff;
     text-style: bold;
+    padding: 1 2;
 }
 
 #byline {
-    height: 1;
-    content-align: center middle;
-    color: #B026FF;
-    text-style: bold;
+    color: #7a5cff;
+    padding: 0 2;
 }
 
 #columns {
     height: 1fr;
-    margin: 1 2;
-}
-
-#left, #right {
-    width: 24%;
-    padding: 1;
-}
-
-#center {
-    width: 52%;
     padding: 1 2;
-    border: round #00F6FF;
 }
 
-#system_panel, #status_panel, #modules, #warning {
-    padding: 1;
-    margin-bottom: 1;
-    border: round #00F6FF;
-    background: #080C13;
-}
-
-#modules {
-    color: #B026FF;
-    border: round #B026FF;
-}
-
-#warning {
-    color: #FF3344;
-    border: round #FF3344;
+#left, #center, #right {
+    width: 1fr;
+    padding: 0 1;
 }
 
 .panel_title {
-    color: #39FF88;
-    text-style: bold;
-    margin-bottom: 1;
-}
-
-#menu1, #menu2, #menu3 {
-    height: 5;
-    margin: 1 0;
-    padding: 1;
-    content-align: center middle;
-    border: round #00F6FF;
-    color: #00F6FF;
+    color: #ff2e88;
     text-style: bold;
 }
 
-#menu2 {
-    border: round #B026FF;
-    color: #B026FF;
+#system_panel, #status_panel, #modules, #warning,
+#menu1, #menu2, #menu3, #menu4, #prompt {
+    padding: 0 1;
 }
 
-#menu3 {
-    border: round #FF3344;
-    color: #FF3344;
+#warning {
+    color: #ffb020;
 }
 
-#prompt {
-    color: #39FF88;
-    text-align: center;
-    margin-top: 1;
+#offensive_warning {
+    background: #2a0a0a;
+    color: #ff8888;
+    text-style: bold;
+    padding: 1 2;
+    border: round #ff5555;
 }
 
-#footer {
-    height: 1;
-    content-align: center middle;
-    color: #00F6FF;
+#offensive_live {
+    background: #12121c;
+    color: #ffaa88;
+    padding: 1 2;
+    border: round #ff5555;
 }
 
-#detail {
-    margin: 2 8;
-    padding: 2;
-    border: double #00F6FF;
-    color: #39FF88;
-    background: #080C13;
+#offensive_form, #offensive_buttons {
+    padding: 1 2;
+    height: auto;
 }
 
-Footer {
-    background: #080C13;
-    color: #B026FF;
+#footer, #footer_text {
+    color: #555;
+    padding: 0 2;
+}
+
+#status_panel_live, #live {
+    background: #12121c;
+    color: #00ffaa;
+    padding: 1 2;
+    border: round #00e5ff;
+}
+
+#input_area {
+    padding: 1 2;
+    height: auto;
+}
+
+#urls_scroll {
+    height: 6;
+    border: round #333;
+    padding: 0 1;
+}
+
+Button {
+    margin: 0 1;
 }

@@ -1,22 +1,3 @@
-"""
-captcha_waf_bypass.py
----------------------
-Module moderne de contournement de CAPTCHA et WAF.
-
-Approches couvertes :
-1. Détection automatique du type de protection (CAPTCHA / WAF / challenge JS)
-2. Empreinte TLS/JA3 réaliste via curl_cffi (imitation Chrome/Safari/Edge)
-3. Résolution de CAPTCHA via services spécialisés (2Captcha, CapSolver, Anti-Captcha...)
-4. Résolution de challenges WAF (Cloudflare, AWS WAF, DataDome, Akamai...)
-5. Bascule automatique vers navigateur furtif (Playwright / nodriver) si nécessaire
-6. Intégration complète avec les 6 modules précédents (proxy, UA, jitter,
-   fragmentation, backoff adaptatif, bots distribués)
-
-Usage simple :
-    bypass = CaptchaWafBypass(capsolver_api_key="CAP-...")
-    resp = bypass.request("GET", "https://protected-site.com")
-"""
-
 import os
 import re
 import time
@@ -28,10 +9,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Callable
 from urllib.parse import urlparse, urlencode, quote
+from core.proxy_rotator import ProxyRotator
+from core.user_agent_rotator import UserAgentRotator
+from core.delay_jitter import DelayJitter, RateLimiter, backoff_delay
+from core.adaptive_backoff import AdaptiveBackoff
 
-# ---------------------------------------------------------------------------
-# Imports optionnels — le module reste utilisable même si certains manquent
-# ---------------------------------------------------------------------------
 try:
     import requests
 except ImportError:

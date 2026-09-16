@@ -1,56 +1,48 @@
 """
 request_fragmenter.py
 ---------------------
-Fragmentation des requêtes HTTP pour le scraping furtif et les gros envois.
+Outils de découpage de requêtes HTTP.
 
-Fonctionnalités :
-- Découpage d'un payload (dict / JSON / bytes) en chunks (chunked upload)
-- Fragmentation des paramètres d'URL (?a=1&b=2 -> plusieurs requêtes)
-- Pagination automatique (page/offset/cursor) avec détection de fin
-- Distribution d'une liste d'URLs sur plusieurs proxies / User-Agents
-- Envoi en streaming morceau par morceau (Transfer-Encoding: chunked)
-- Compatible avec ProxyRotator, UserAgentRotator, DelayJitter (imports optionnels)
-- Support sync (requests) et async (aiohttp)
+IMPORTANT — Contrat serveur :
+  Les méthodes 'upload_in_chunks' et 'stream_in_chunks' ne fonctionnent QUE
+  si la cible expose un endpoint capable de RÉASSEMBLER les morceaux
+  (champ X-Chunk-Index / X-Chunk-Total, ou Transfer-Encoding: chunked natif).
+  Contre un serveur qui ne sait pas réassembler, ces appels produisent
+  N requêtes indépendantes (bruit réseau), pas un upload fragmenté.
+
+Ce module est conçu pour tester tes propres services avec un endpoint
+dédié au chunked upload, pas pour fragmenter du trafic vers des tiers.
 """
 
+from __future__ import annotations
+
 import json
-import math
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+import time
+import logging
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 from itertools import islice
 
-
-# ---------------------------------------------------------------------------
-# Imports optionnels des modules compagnons
-# ---------------------------------------------------------------------------
 try:
-    from proxy_rotator import ProxyRotator  # type: ignore
+    import requests
 except ImportError:
-    ProxyRotator = None  # type: ignore
+    requests = None  # type: ignore
 
 try:
-    from user_agent_rotator import UserAgentRotator  # type: ignore
+    from core.delay_jitter import backoff_delay  # type: ignore
 except ImportError:
-    UserAgentRotator = None  # type: ignore
-
-try:
-    from delay_jitter import DelayJitter, RateLimiter, backoff_delay  # type: ignore
-except ImportError:
-    DelayJitter = None  # type: ignore
-    RateLimiter = None  # type: ignore
     backoff_delay = None  # type: ignore
 
+logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Helpers internes
-# ---------------------------------------------------------------------------
+
 def _chunks(seq: List[Any], size: int) -> Iterator[List[Any]]:
-    """Découpe une liste en sous-listes de taille `size`."""
+    if size <= 0:
+        raise ValueError("size doit être > 0")
     for i in range(0, len(seq), size):
         yield seq[i:i + size]
 
 
 def _serialize(payload: Any) -> bytes:
-    """Sérialise un payload en bytes (dict -> JSON, str -> utf-8, bytes -> tel quel)."""
     if isinstance(payload, bytes):
         return payload
     if isinstance(payload, str):
@@ -58,33 +50,18 @@ def _serialize(payload: Any) -> bytes:
     return json.dumps(payload).encode("utf-8")
 
 
-# ---------------------------------------------------------------------------
-# Classe principale
-# ---------------------------------------------------------------------------
 class RequestFragmenter:
-    """
-    Fragmente des requêtes HTTP de différentes manières.
-    """
-
     def __init__(self,
-                 chunk_size: int = 1024 * 64,      # 64 Ko par défaut
+                 chunk_size: int = 64 * 1024,
                  max_params_per_request: int = 5,
                  max_urls_per_batch: int = 10,
                  proxy_rotator: Optional[Any] = None,
                  ua_rotator: Optional[Any] = None,
                  jitter: Optional[Any] = None,
                  rate_limiter: Optional[Any] = None,
-                 max_retries: int = 3):
-        """
-        :param chunk_size: Taille des morceaux pour le chunked upload (bytes)
-        :param max_params_per_request: Nombre de paramètres par requête fragmentée
-        :param max_urls_per_batch: Nombre d'URLs par lot distribué
-        :param proxy_rotator: Instance de ProxyRotator (optionnel)
-        :param ua_rotator: Instance de UserAgentRotator (optionnel)
-        :param jitter: Instance de DelayJitter (optionnel)
-        :param rate_limiter: Instance de RateLimiter (optionnel)
-        :param max_retries: Nombre de tentatives en cas d'échec
-        """
+                 max_retries: int = 3,
+                 timeout: float = 15.0,
+                 session: Optional[Any] = None):
         self.chunk_size = chunk_size
         self.max_params_per_request = max_params_per_request
         self.max_urls_per_batch = max_urls_per_batch
@@ -93,17 +70,19 @@ class RequestFragmenter:
         self.jitter = jitter
         self.rate_limiter = rate_limiter
         self.max_retries = max_retries
+        self.timeout = timeout
+
+        if requests is None:
+            raise ImportError("requests requis : pip install requests")
+        self.session = session or requests.Session()
 
     # ------------------------------------------------------------------
-    # 1) Fragmentation d'un payload en chunks (chunked upload)
+    # 1) Découpage de payload (nécessite endpoint récepteur)
     # ------------------------------------------------------------------
     def fragment_payload(self, payload: Any) -> List[bytes]:
-        """
-        Découpe un payload (dict / JSON / bytes / str) en morceaux de `chunk_size` octets.
-        Retourne une liste de chunks (bytes).
-        """
         data = _serialize(payload)
-        return [data[i:i + self.chunk_size] for i in range(0, len(data), self.chunk_size)]
+        return [data[i:i + self.chunk_size]
+                for i in range(0, len(data), self.chunk_size)]
 
     def upload_in_chunks(self,
                          url: str,
@@ -111,12 +90,9 @@ class RequestFragmenter:
                          method: str = "POST",
                          extra_headers: Optional[Dict[str, str]] = None) -> List[Any]:
         """
-        Envoie un gros payload en plusieurs requêtes successives (chunked upload applicatif).
-        Chaque chunk est envoyé à `url` avec les en-têtes X-Chunk-Index / X-Chunk-Total.
-        Retourne la liste des réponses.
+        Envoie un payload en plusieurs requêtes séquentielles, indexées.
+        Le serveur DOIT réassembler via X-Chunk-Index / X-Chunk-Total.
         """
-        import requests
-
         chunks = self.fragment_payload(payload)
         total = len(chunks)
         responses = []
@@ -127,10 +103,9 @@ class RequestFragmenter:
                 "Content-Type": "application/octet-stream",
                 "X-Chunk-Index": str(i),
                 "X-Chunk-Total": str(total),
-                "Content-Length": str(len(chunk)),
             })
             resp = self._request_with_retry(
-                requests, method, url, data=chunk, headers=headers
+                method, url, data=chunk, headers=headers
             )
             responses.append(resp)
         return responses
@@ -141,11 +116,9 @@ class RequestFragmenter:
                          method: str = "POST",
                          extra_headers: Optional[Dict[str, str]] = None) -> Any:
         """
-        Envoie un payload en utilisant Transfer-Encoding: chunked (vrai streaming HTTP).
-        `requests` gère automatiquement le chunked si on lui passe un générateur.
+        Streaming HTTP natif (Transfer-Encoding: chunked).
+        Le serveur DOIT supporter le chunked transfer-encoding.
         """
-        import requests
-
         chunks = self.fragment_payload(payload)
         headers = self._build_headers(extra_headers)
         headers["Content-Type"] = "application/octet-stream"
@@ -154,39 +127,35 @@ class RequestFragmenter:
             for c in chunks:
                 yield c
 
-        return self._request_with_retry(
-            requests, method, url, data=gen(), headers=headers
-        )
+        return self._request_with_retry(method, url, data=gen(), headers=headers)
 
     # ------------------------------------------------------------------
-    # 2) Fragmentation des paramètres d'URL
+    # 2) Découpage des paramètres (split, PAS fragmentation)
     # ------------------------------------------------------------------
-    def fragment_params(self,
-                        url: str,
-                        params: Dict[str, Any],
-                        method: str = "GET",
-                        extra_headers: Optional[Dict[str, str]] = None) -> List[Any]:
+    def split_params(self,
+                     url: str,
+                     params: Dict[str, Any],
+                     method: str = "GET",
+                     extra_headers: Optional[Dict[str, str]] = None) -> List[Any]:
         """
-        Découpe un dictionnaire de paramètres en plusieurs requêtes.
-        Exemple : {'a':1,'b':2,'c':3} avec max=2 -> 2 requêtes.
+        Envoie les paramètres en plusieurs requêtes.
+        ATTENTION : la réponse n'a de sens que si le serveur accepte
+        des paramètres partiels (API tolérante).
         """
-        import requests
-
         items = list(params.items())
         batches = list(_chunks(items, self.max_params_per_request))
         responses = []
 
         for batch in batches:
-            batch_params = dict(batch)
             headers = self._build_headers(extra_headers)
             resp = self._request_with_retry(
-                requests, method, url, params=batch_params, headers=headers
+                method, url, params=dict(batch), headers=headers
             )
             responses.append(resp)
         return responses
 
     # ------------------------------------------------------------------
-    # 3) Pagination automatique
+    # 3) Pagination
     # ------------------------------------------------------------------
     def paginate(self,
                  url: str,
@@ -197,18 +166,6 @@ class RequestFragmenter:
                  method: str = "GET",
                  extra_headers: Optional[Dict[str, str]] = None,
                  extra_params: Optional[Dict[str, Any]] = None) -> List[Any]:
-        """
-        Enchaîne des requêtes paginées jusqu'à détecter la dernière page.
-
-        :param page_param: Nom du paramètre de page (`page`, `offset`, `p`, ...)
-        :param start: Numéro de la première page
-        :param max_pages: Nombre maximum de pages (sécurité)
-        :param is_last: Fonction qui prend la réponse et retourne True si dernière page.
-                        Par défaut : détecte une liste vide / page vide / plus de résultats.
-        :return: Liste des réponses HTTP
-        """
-        import requests
-
         responses = []
         page = start
 
@@ -218,7 +175,7 @@ class RequestFragmenter:
             headers = self._build_headers(extra_headers)
 
             resp = self._request_with_retry(
-                requests, method, url, params=params, headers=headers
+                method, url, params=params, headers=headers
             )
             if resp is None:
                 break
@@ -227,7 +184,6 @@ class RequestFragmenter:
 
             if is_last and is_last(resp):
                 break
-            # Détection automatique de fin
             if not is_last and self._looks_empty(resp):
                 break
             if resp.status_code in (404, 410):
@@ -238,19 +194,13 @@ class RequestFragmenter:
         return responses
 
     # ------------------------------------------------------------------
-    # 4) Distribution d'URLs sur plusieurs proxies / UAs
+    # 4) Distribution d'URLs
     # ------------------------------------------------------------------
     def distribute(self,
                    urls: List[str],
                    method: str = "GET",
                    extra_headers: Optional[Dict[str, str]] = None,
                    chunk_size: Optional[int] = None) -> List[Any]:
-        """
-        Distribue une liste d'URLs sur plusieurs proxies / User-Agents.
-        Chaque lot (batch) utilise un proxy et un UA différents.
-        """
-        import requests
-
         batch_size = chunk_size or self.max_urls_per_batch
         responses = []
 
@@ -259,17 +209,13 @@ class RequestFragmenter:
             proxies = self._get_proxies()
             for url in batch:
                 resp = self._request_with_retry(
-                    requests, method, url, headers=headers, proxies=proxies
+                    method, url, headers=headers, proxies=proxies
                 )
                 responses.append(resp)
         return responses
 
-    # ------------------------------------------------------------------
-    # 5) Fragmentation générique via un itérateur
-    # ------------------------------------------------------------------
     @staticmethod
     def fragment_iterable(iterable: Iterable, size: int) -> Iterator[List[Any]]:
-        """Découpe n'importe quel itérable en morceaux de `size`."""
         it = iter(iterable)
         while True:
             chunk = list(islice(it, size))
@@ -278,16 +224,13 @@ class RequestFragmenter:
             yield chunk
 
     # ------------------------------------------------------------------
-    # 6) Version asynchrone (aiohttp) — payload chunké + distribution
+    # Async
     # ------------------------------------------------------------------
     async def upload_in_chunks_async(self,
                                      url: str,
                                      payload: Any,
                                      method: str = "POST",
                                      extra_headers: Optional[Dict[str, str]] = None) -> List[Any]:
-        """
-        Version async de upload_in_chunks (nécessite aiohttp).
-        """
         try:
             import aiohttp
         except ImportError:
@@ -314,10 +257,9 @@ class RequestFragmenter:
         return results
 
     # ------------------------------------------------------------------
-    # Méthodes internes
+    # Internes
     # ------------------------------------------------------------------
     def _build_headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-        """Construit les en-têtes, en y ajoutant un UA aléatoire si dispo."""
         headers: Dict[str, str] = {}
         if self.ua_rotator is not None:
             headers = self.ua_rotator.get_headers()
@@ -326,54 +268,55 @@ class RequestFragmenter:
         return headers
 
     def _get_proxies(self) -> Optional[Dict[str, str]]:
-        """Récupère un proxy aléatoire si un rotateur est fourni."""
         if self.proxy_rotator is None:
             return None
         return self.proxy_rotator.get_proxy()
 
-    def _request_with_retry(self,
-                            requests_mod,
-                            method: str,
-                            url: str,
-                            **kwargs) -> Any:
+    def _request_with_retry(self, method: str, url: str, **kwargs) -> Any:
         """
-        Effectue la requête avec :
-        - rate-limiting (optionnel)
-        - jitter (optionnel)
-        - proxy rotatif (optionnel)
-        - retry avec backoff exponentiel
+        Retry avec backoff. Le timeout est fixé une seule fois.
+        Le proxy est choisi à chaque tentative (rotation).
         """
+        kwargs.setdefault("timeout", self.timeout)
+
         for attempt in range(self.max_retries):
             try:
                 if self.rate_limiter is not None:
                     self.rate_limiter.wait()
                 if self.jitter is not None:
                     self.jitter.sleep()
-                if "proxies" not in kwargs:
-                    kwargs["proxies"] = self._get_proxies()
-                kwargs.setdefault("timeout", 15)
 
-                resp = requests_mod.request(method, url, **kwargs)
-                if resp.status_code in (403, 429, 503):
-                    if self.proxy_rotator is not None and kwargs.get("proxies"):
-                        self.proxy_rotator.mark_bad(kwargs["proxies"]["http"])
-                    if backoff_delay is not None:
-                        import time
-                        time.sleep(backoff_delay(attempt, jitter="full"))
-                    continue
+                proxies = kwargs.get("proxies") or self._get_proxies()
+                if proxies:
+                    kwargs["proxies"] = proxies
+
+                resp = self.session.request(method, url, **kwargs)
+
+                if resp.status_code in (403, 429, 502, 503, 504):
+                    if self.proxy_rotator is not None and proxies:
+                        self.proxy_rotator.mark_bad(
+                            proxies.get("http", ""),
+                            reason=f"HTTP {resp.status_code}",
+                        )
+                    if attempt < self.max_retries - 1:
+                        delay = (backoff_delay(attempt, jitter="full")
+                                 if backoff_delay else 2 ** attempt)
+                        time.sleep(delay)
+                        continue
                 return resp
+
             except Exception as e:
+                logger.warning("Tentative %d échouée sur %s : %r",
+                               attempt + 1, url, e)
                 if attempt == self.max_retries - 1:
-                    print(f"[!] Échec définitif {url} : {e}")
                     return None
-                if backoff_delay is not None:
-                    import time
-                    time.sleep(backoff_delay(attempt, jitter="full"))
+                delay = (backoff_delay(attempt, jitter="full")
+                         if backoff_delay else 2 ** attempt)
+                time.sleep(delay)
         return None
 
     @staticmethod
     def _looks_empty(resp) -> bool:
-        """Heuristique : détecte une page sans contenu (fin de pagination)."""
         try:
             data = resp.json()
             if isinstance(data, list) and not data:
@@ -385,70 +328,24 @@ class RequestFragmenter:
                 if data.get("has_more") is False or data.get("next") is None:
                     return True
         except Exception:
-            # Réponse non-JSON : on regarde si le corps est très court
             if len(resp.text.strip()) < 10:
                 return True
         return False
 
 
-# ---------------------------------------------------------------------------
-# Démo
-# ---------------------------------------------------------------------------
-def demo():
-    from user_agent_rotator import UserAgentRotator
-    from delay_jitter import DelayJitter, RateLimiter
-
-    ua = UserAgentRotator()
-    jitter = DelayJitter(min_delay=0.3, max_delay=1.2, mode="human")
-    limiter = RateLimiter(max_calls=3, period=1.0)
-
-    frag = RequestFragmenter(
-        chunk_size=32,                # petits chunks pour la démo
-        max_params_per_request=2,
-        max_urls_per_batch=2,
-        ua_rotator=ua,
-        jitter=jitter,
-        rate_limiter=limiter,
-    )
-
-    # 1) Fragmenter un payload
-    payload = {"description": "A" * 200}
-    chunks = frag.fragment_payload(payload)
-    print(f"=== Payload fragmenté en {len(chunks)} morceaux ===")
-    for i, c in enumerate(chunks):
-        print(f"  chunk {i}: {len(c)} octets")
-
-    # 2) Fragmenter des paramètres
-    print("\n=== Fragmentation des paramètres ===")
-    responses = frag.fragment_params(
-        "https://httpbin.org/get",
-        {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5},
-    )
-    for r in responses:
-        if r is not None:
-            print(f"  {r.status_code} -> {r.url}")
-
-    # 3) Distribution d'URLs
-    print("\n=== Distribution d'URLs ===")
-    urls = [f"https://httpbin.org/anything/{i}" for i in range(6)]
-    for r in frag.distribute(urls):
-        if r is not None:
-            print(f"  {r.status_code} -> {r.url}")
-
-
 if __name__ == "__main__":
     import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--chunk-size", type=int, default=32)
+    p.add_argument("--params-per-request", type=int, default=2)
+    args = p.parse_args()
 
-    parser = argparse.ArgumentParser(description="Fragmentation de requêtes HTTP.")
-    parser.add_argument("--demo", action="store_true", help="Exécuter la démo complète")
-    parser.add_argument("--chunk-size", type=int, default=1024 * 64)
-    parser.add_argument("--params-per-request", type=int, default=5)
-    parser.add_argument("--urls-per-batch", type=int, default=10)
-    args = parser.parse_args()
-
-    if args.demo:
-        demo()
-    else:
-        print("Utilise --demo pour voir un exemple d'utilisation.")
-        print("Ou importe RequestFragmenter dans ton code :")
-        print("  from request_fragmenter import RequestFragmenter")
+    frag = RequestFragmenter(
+        chunk_size=args.chunk_size,
+        max_params_per_request=args.params_per_request,
+    )
+    payload = {"description": "A" * 200}
+    chunks = frag.fragment_payload(payload)
+    print(f"Payload fragmenté en {len(chunks)} morceaux :")
+    for i, c in enumerate(chunks):
+        print(f"  chunk {i}: {len(c)} octets")

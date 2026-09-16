@@ -1,66 +1,33 @@
 """
 distributed_bots.py
 -------------------
-Orchestration de bots distribués pour scraping/crawl distribué.
-
-Fonctionnalités :
-- Pool de workers (threads, processus ou asyncio)
-- File de tâches partagée (mémoire ou Redis)
-- État global coordonné : proxies, backoff adaptatif, rate-limit
-- Distribution des tâches par domaine (sharding anti-collision)
-- Heartbeat / monitoring de santé des workers
-- Agrégation des résultats + callbacks
-- Récupération automatique des tâches échouées (retry queue)
-- Compatible avec ProxyRotator, UserAgentRotator, DelayJitter,
-  RequestFragmenter et AdaptiveBackoff
-
-Usage simple :
-    pool = DistributedBotPool(num_workers=4, tasks=urls, handler=my_handler)
-    results = pool.run()
+Orchestrateur de workers multi-thread avec file in-memory ou Redis.
 """
+
+from __future__ import annotations
 
 import time
 import uuid
 import threading
 import queue
 import signal
-import random
 import hashlib
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, Iterable, List, Optional
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from urllib.parse import urlparse
 
-
-# ---------------------------------------------------------------------------
-# Imports optionnels des modules compagnons
-# ---------------------------------------------------------------------------
 try:
-    from proxy_rotator import ProxyRotator  # type: ignore
+    from core.delay_jitter import backoff_delay # type: ignore
 except ImportError:
-    ProxyRotator = None  # type: ignore
-
-try:
-    from user_agent_rotator import UserAgentRotator  # type: ignore
-except ImportError:
-    UserAgentRotator = None  # type: ignore
-
-try:
-    from delay_jitter import DelayJitter, RateLimiter, backoff_delay  # type: ignore
-except ImportError:
-    DelayJitter = None  # type: ignore
-    RateLimiter = None  # type: ignore
     backoff_delay = None  # type: ignore
 
-try:
-    from adaptive_backoff import AdaptiveBackoff  # type: ignore
-except ImportError:
-    AdaptiveBackoff = None  # type: ignore
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Structures de données
+# Structures
 # ---------------------------------------------------------------------------
 class TaskStatus(str, Enum):
     PENDING = "pending"
@@ -74,12 +41,10 @@ class WorkerStatus(str, Enum):
     IDLE = "idle"
     BUSY = "busy"
     STOPPED = "stopped"
-    DEAD = "dead"
 
 
 @dataclass
 class Task:
-    """Une tâche unitaire à exécuter."""
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     url: str = ""
     payload: Any = None
@@ -93,12 +58,25 @@ class Task:
     result: Any = None
     error: Optional[str] = None
     worker_id: Optional[str] = None
-    shard_key: Optional[str] = None  # ex: host, pour sharding par domaine
+    shard_key: Optional[str] = None
+
+    def clone_for_retry(self) -> "Task":
+        """Nouvelle instance pour la file de retry (résultat non transporté)."""
+        return Task(
+            id=self.id,
+            url=self.url,
+            payload=self.payload,
+            meta=dict(self.meta),
+            attempts=self.attempts,
+            max_attempts=self.max_attempts,
+            status=TaskStatus.RETRY,
+            created_at=self.created_at,
+            shard_key=self.shard_key,
+        )
 
 
 @dataclass
 class WorkerInfo:
-    """État d'un worker."""
     id: str
     status: WorkerStatus = WorkerStatus.IDLE
     current_task: Optional[str] = None
@@ -106,14 +84,13 @@ class WorkerInfo:
     tasks_failed: int = 0
     last_heartbeat: float = field(default_factory=time.time)
     started_at: float = field(default_factory=time.time)
+    current_proxy: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
-# File de tâches : in-memory (défaut) + Redis (optionnel)
+# Files de tâches
 # ---------------------------------------------------------------------------
 class InMemoryTaskQueue:
-    """File FIFO thread-safe en mémoire."""
-
     def __init__(self):
         self._q: "queue.Queue[Task]" = queue.Queue()
         self._retry: "queue.Queue[Task]" = queue.Queue()
@@ -121,8 +98,7 @@ class InMemoryTaskQueue:
     def put(self, task: Task, retry: bool = False) -> None:
         (self._retry if retry else self._q).put(task)
 
-    def get(self, timeout: float = 1.0) -> Optional[Task]:
-        # Priorité aux retries
+    def get(self, timeout: float = 0.5) -> Optional[Task]:
         try:
             return self._retry.get_nowait()
         except queue.Empty:
@@ -141,32 +117,31 @@ class InMemoryTaskQueue:
 
 class RedisTaskQueue:
     """
-    File de tâches distribuée via Redis (nécessite `redis` + un serveur Redis).
-    Permet à plusieurs machines de partager la même file.
+    File distribuée via Redis.
+    Le résultat n'est PAS sérialisé dans la file (évite la saturation).
     """
 
-    def __init__(self, host: str = "localhost", port: int = 6379, db: int = 0, key: str = "bot:tasks"):
+    def __init__(self, host: str = "localhost", port: int = 6379,
+                 db: int = 0, key: str = "bot:tasks"):
         try:
             import redis  # type: ignore
+            import json as _json
         except ImportError:
             raise ImportError("pip install redis")
-        import json
-        self._json = json
+        self._json = _json
         self.r = redis.Redis(host=host, port=port, db=db, decode_responses=True)
         self.key = key
         self.retry_key = f"{key}:retry"
 
-    @staticmethod
-    def _to_dict(task: Task) -> Dict:
+    def _to_dict(self, t: Task) -> Dict:
         return {
-            "id": task.id, "url": task.url, "payload": task.payload,
-            "meta": task.meta, "attempts": task.attempts,
-            "max_attempts": task.max_attempts,
-            "created_at": task.created_at, "shard_key": task.shard_key,
+            "id": t.id, "url": t.url, "payload": t.payload,
+            "meta": t.meta, "attempts": t.attempts,
+            "max_attempts": t.max_attempts,
+            "created_at": t.created_at, "shard_key": t.shard_key,
         }
 
-    @staticmethod
-    def _from_dict(d: Dict) -> Task:
+    def _from_dict(self, d: Dict) -> Task:
         return Task(
             id=d["id"], url=d["url"], payload=d.get("payload"),
             meta=d.get("meta", {}), attempts=d.get("attempts", 0),
@@ -180,14 +155,13 @@ class RedisTaskQueue:
         self.r.lpush(key, self._json.dumps(self._to_dict(task)))
 
     def get(self, timeout: float = 1.0) -> Optional[Task]:
-        # Priorité aux retries
         for key in (self.retry_key, self.key):
             item = self.r.rpop(key)
             if item:
                 return self._from_dict(self._json.loads(item))
         if timeout > 0:
-            # Blocage court
-            item = self.r.brpop([self.retry_key, self.key], timeout=int(max(1, timeout)))
+            item = self.r.brpop([self.retry_key, self.key],
+                                timeout=int(max(1, timeout)))
             if item:
                 return self._from_dict(self._json.loads(item[1]))
         return None
@@ -200,41 +174,30 @@ class RedisTaskQueue:
 
 
 # ---------------------------------------------------------------------------
-# Pool de bots distribués
+# Pool
 # ---------------------------------------------------------------------------
 class DistributedBotPool:
-    """
-    Orchestrateur de bots distribués.
-    """
-
     def __init__(self,
                  tasks: Optional[Iterable[Any]] = None,
                  handler: Optional[Callable[[Task, "BotContext"], Any]] = None,
                  num_workers: int = 4,
-                 mode: str = "thread",                    # 'thread' | 'process' | 'async'
-                 shard_by: str = "host",                  # 'host' | 'none' | 'hash'
+                 mode: str = "thread",
+                 shard_by: str = "host",
                  proxy_rotator: Optional[Any] = None,
                  ua_rotator: Optional[Any] = None,
                  jitter: Optional[Any] = None,
                  rate_limiter: Optional[Any] = None,
                  backoff: Optional[Any] = None,
-                 task_queue: Optional[Any] = None,        # InMemoryTaskQueue | RedisTaskQueue
+                 task_queue: Optional[Any] = None,
                  on_result: Optional[Callable[[Task], None]] = None,
                  on_error: Optional[Callable[[Task], None]] = None,
                  verbose: bool = False):
-        """
-        :param tasks: Itérable initial de tâches (URLs ou dicts avec 'url')
-        :param handler: Fonction (task, context) -> résultat. Reçoit le contexte
-                        (proxies, headers, backoff, session) pour exécuter la requête.
-        :param num_workers: Nombre de workers parallèles
-        :param mode: Type d'exécution
-        :param shard_by: Stratégie de sharding (par host, par hash, aucun)
-        :param proxy_rotator / ua_rotator / jitter / rate_limiter / backoff :
-                        Instances des modules compagnons (optionnels)
-        :param task_queue: File custom (Redis pour vraie distribution multi-machines)
-        :param on_result / on_error: Callbacks
-        :param verbose: Logs
-        """
+        if mode != "thread":
+            raise ValueError(
+                "Seul le mode 'thread' est supporté avec état partagé en mémoire. "
+                "Pour du multi-process, utilise RedisTaskQueue + plusieurs "
+                "process lancés séparément."
+            )
         self.handler = handler
         self.num_workers = num_workers
         self.mode = mode
@@ -255,13 +218,10 @@ class DistributedBotPool:
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
 
-        # Chargement initial des tâches
         if tasks:
             for t in tasks:
                 self.add_task(t)
 
-    # ------------------------------------------------------------------
-    # Gestion des tâches
     # ------------------------------------------------------------------
     def _normalize_task(self, item: Any) -> Task:
         if isinstance(item, Task):
@@ -277,7 +237,6 @@ class DistributedBotPool:
             )
         else:
             raise TypeError(f"Type de tâche non supporté : {type(item)}")
-        # Sharding
         task.shard_key = self._shard_key(task)
         return task
 
@@ -302,9 +261,6 @@ class DistributedBotPool:
             n += 1
         return n
 
-    # ------------------------------------------------------------------
-    # Contexte passé au handler
-    # ------------------------------------------------------------------
     def _build_context(self, worker_id: str, task: Task) -> "BotContext":
         return BotContext(
             worker_id=worker_id,
@@ -318,7 +274,19 @@ class DistributedBotPool:
         )
 
     # ------------------------------------------------------------------
-    # Boucle d'un worker
+    # Décision d'arrêt
+    # ------------------------------------------------------------------
+    def _should_stop(self) -> bool:
+        """
+        À appeler sous verrou. Vrai si la file est vide ET aucun worker BUSY.
+        """
+        if not self.queue.empty():
+            return False
+        return not any(w.status == WorkerStatus.BUSY
+                       for w in self.workers.values())
+
+    # ------------------------------------------------------------------
+    # Boucle worker
     # ------------------------------------------------------------------
     def _worker_loop(self, worker_id: str) -> None:
         info = WorkerInfo(id=worker_id)
@@ -326,17 +294,14 @@ class DistributedBotPool:
             self.workers[worker_id] = info
 
         if self.verbose:
-            print(f"[pool] worker {worker_id} démarré")
+            logger.info("[pool] worker %s démarré", worker_id)
 
         while not self._stop_event.is_set():
             task = self.queue.get(timeout=0.5)
 
             if task is None:
-                if self.queue.empty():
-                    # File vide : on vérifie si d'autres workers tournent encore
-                    with self._lock:
-                        busy = any(w.status == WorkerStatus.BUSY for w in self.workers.values())
-                    if not busy:
+                with self._lock:
+                    if self._should_stop():
                         break
                 continue
 
@@ -349,27 +314,20 @@ class DistributedBotPool:
             task.worker_id = worker_id
             task.attempts += 1
 
-            context = self._build_context(worker_id, task)
+            ctx = self._build_context(worker_id, task)
 
             try:
-                # Attendre si le domaine est bloqué (backoff adaptatif)
-                if self.backoff is not None and self.backoff.is_available(task.url):
-                    self.backoff.wait_if_blocked(task.url)
-                elif self.backoff is not None:
-                    # Circuit ouvert : on remet en retry
-                    task.status = TaskStatus.RETRY
-                    self.queue.put(task, retry=True)
-                    info.status = WorkerStatus.IDLE
-                    info.current_task = None
-                    continue
+                # Circuit breaker global
+                if self.backoff is not None:
+                    if not self.backoff.is_available(task.url):
+                        self.backoff.wait_if_blocked(task.url)
 
-                # Rate limit + jitter globaux
                 if self.rate_limiter is not None:
                     self.rate_limiter.wait()
                 if self.jitter is not None:
                     self.jitter.sleep()
 
-                result = self.handler(task, context) if self.handler else None
+                result = self.handler(task, ctx) if self.handler else None
 
                 task.result = result
                 task.status = TaskStatus.DONE
@@ -382,29 +340,30 @@ class DistributedBotPool:
                 if self.on_result:
                     try:
                         self.on_result(task)
-                    except Exception as e:
-                        if self.verbose:
-                            print(f"[pool] on_result a échoué : {e}")
+                    except Exception:
+                        logger.exception("on_result a échoué")
 
                 if self.verbose:
-                    print(f"[pool] worker {worker_id} OK {task.url[:80]}")
+                    logger.info("[pool] %s OK %s", worker_id, task.url[:80])
 
             except Exception as e:
-                task.error = str(e)
+                task.error = repr(e)
                 task.finished_at = time.time()
 
-                # Retry si possible
                 if task.attempts < task.max_attempts:
                     task.status = TaskStatus.RETRY
-                    delay = 1.0
                     if self.backoff is not None:
                         delay = self.backoff.on_failure(task.url, exception=e)
                     elif backoff_delay is not None:
                         delay = backoff_delay(task.attempts - 1, jitter="full")
-                    time.sleep(min(delay, 5.0))  # cap court avant remise en file
-                    self.queue.put(task, retry=True)
+                    else:
+                        delay = min(2 ** task.attempts, 5.0)
+                    time.sleep(min(delay, 5.0))
+                    self.queue.put(task.clone_for_retry(), retry=True)
                     if self.verbose:
-                        print(f"[pool] worker {worker_id} RETRY {task.url[:80]} ({task.attempts}/{task.max_attempts})")
+                        logger.info("[pool] %s RETRY %s (%d/%d)",
+                                    worker_id, task.url[:60],
+                                    task.attempts, task.max_attempts)
                 else:
                     task.status = TaskStatus.FAILED
                     info.tasks_failed += 1
@@ -414,54 +373,45 @@ class DistributedBotPool:
                         try:
                             self.on_error(task)
                         except Exception:
-                            pass
+                            logger.exception("on_error a échoué")
                     if self.verbose:
-                        print(f"[pool] worker {worker_id} FAIL {task.url[:80]} -> {e}")
+                        logger.warning("[pool] %s FAIL %s -> %r",
+                                       worker_id, task.url[:60], e)
 
             finally:
                 info.status = WorkerStatus.IDLE
                 info.current_task = None
+                info.current_proxy = None
                 info.last_heartbeat = time.time()
 
         info.status = WorkerStatus.STOPPED
         if self.verbose:
-            print(f"[pool] worker {worker_id} arrêté ({info.tasks_done} ok / {info.tasks_failed} ko)")
+            logger.info("[pool] worker %s arrêté (%d ok / %d ko)",
+                        worker_id, info.tasks_done, info.tasks_failed)
 
     # ------------------------------------------------------------------
-    # Lancement du pool
+    # Lancement
     # ------------------------------------------------------------------
     def run(self, progress_every: float = 5.0) -> Dict[str, Any]:
-        """
-        Lance tous les workers et attend la fin.
-        Retourne un dict avec résultats / statistiques.
-        """
         self._stop_event.clear()
         self.results.clear()
         self.failures.clear()
         self.workers.clear()
 
-        # Monitoring périodique
         stop_monitor = threading.Event()
         monitor_thread = None
         if self.verbose:
             monitor_thread = threading.Thread(
-                target=self._monitor, args=(stop_monitor, progress_every), daemon=True
+                target=self._monitor, args=(stop_monitor, progress_every),
+                daemon=True,
             )
             monitor_thread.start()
 
         t0 = time.time()
-
         try:
-            if self.mode == "thread":
-                self._run_threads()
-            elif self.mode == "process":
-                self._run_processes()
-            elif self.mode == "async":
-                self._run_async()
-            else:
-                raise ValueError(f"Mode inconnu : {self.mode}")
+            self._run_threads()
         except KeyboardInterrupt:
-            print("\n[pool] interruption reçue, arrêt en cours...")
+            logger.info("interruption, arrêt...")
             self.stop()
         finally:
             stop_monitor.set()
@@ -486,69 +436,36 @@ class DistributedBotPool:
         threads = []
         for i in range(self.num_workers):
             wid = f"w{i+1}"
-            t = threading.Thread(target=self._worker_loop, args=(wid,), daemon=False)
+            t = threading.Thread(target=self._worker_loop, args=(wid,),
+                                 daemon=False)
             t.start()
             threads.append(t)
         for t in threads:
             t.join()
 
-    def _run_processes(self) -> None:
-        # Note : avec process, les objets comme ProxyRotator ne sont pas
-        # partagés entre processus. Pour du multi-processus, utiliser Redis
-        # et des instances recréées localement dans le handler.
-        with ProcessPoolExecutor(max_workers=self.num_workers) as ex:
-            futures = [
-                ex.submit(self._worker_loop, f"p{i+1}")
-                for i in range(self.num_workers)
-            ]
-            for f in as_completed(futures):
-                f.result()
-
-    def _run_async(self) -> None:
-        try:
-            import asyncio
-        except ImportError:
-            raise RuntimeError("asyncio indisponible")
-
-        async def wrapper():
-            loop = asyncio.get_event_loop()
-            await asyncio.gather(*[
-                loop.run_in_executor(None, self._worker_loop, f"a{i+1}")
-                for i in range(self.num_workers)
-            ])
-
-        asyncio.run(wrapper())
-
-    # ------------------------------------------------------------------
-    # Monitoring
     # ------------------------------------------------------------------
     def _monitor(self, stop_event: threading.Event, every: float) -> None:
         while not stop_event.wait(every):
             with self._lock:
-                active = sum(1 for w in self.workers.values() if w.status == WorkerStatus.BUSY)
+                active = sum(1 for w in self.workers.values()
+                             if w.status == WorkerStatus.BUSY)
                 done = len(self.results)
                 failed = len(self.failures)
-            print(f"[monitor] file={self.queue.qsize():5d}  "
-                  f"actifs={active}/{self.num_workers}  "
-                  f"ok={done}  ko={failed}")
+            logger.info("[monitor] file=%d actifs=%d/%d ok=%d ko=%d",
+                        self.queue.qsize(), active, self.num_workers,
+                        done, failed)
 
-    # ------------------------------------------------------------------
-    # Arrêt propre
     # ------------------------------------------------------------------
     def stop(self) -> None:
         self._stop_event.set()
 
     def install_signal_handlers(self) -> None:
-        """Arrête proprement le pool sur Ctrl+C / SIGTERM."""
         def handler(signum, frame):
-            print(f"\n[pool] signal {signum} reçu")
+            logger.info("[pool] signal %s reçu", signum)
             self.stop()
         signal.signal(signal.SIGINT, handler)
         signal.signal(signal.SIGTERM, handler)
 
-    # ------------------------------------------------------------------
-    # Statistiques
-    # ------------------------------------------------------------------
     def stats(self) -> Dict[str, Any]:
         with self._lock:
             return {
@@ -566,14 +483,9 @@ class DistributedBotPool:
 
 
 # ---------------------------------------------------------------------------
-# Contexte fourni au handler
+# Contexte
 # ---------------------------------------------------------------------------
 class BotContext:
-    """
-    Contexte passé à chaque handler de tâche.
-    Donne accès aux outils partagés et facilite l'exécution d'une requête.
-    """
-
     def __init__(self,
                  worker_id: str,
                  task: Task,
@@ -591,9 +503,17 @@ class BotContext:
         self.rate_limiter = rate_limiter
         self.backoff = backoff
         self.pool = pool
+        # Mémorise le proxy courant pour ne pas en tirer un autre
+        # au moment de marquer 'bad'
+        self._current_proxy_url: Optional[str] = None
 
     def get_proxies(self) -> Optional[Dict[str, str]]:
-        return self.proxy_rotator.get_proxy() if self.proxy_rotator else None
+        if self.proxy_rotator is None:
+            return None
+        proxies = self.proxy_rotator.get_proxy()
+        if proxies:
+            self._current_proxy_url = proxies.get("http")
+        return proxies
 
     def get_headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         headers = self.ua_rotator.get_headers() if self.ua_rotator else {}
@@ -602,10 +522,6 @@ class BotContext:
         return headers
 
     def request(self, session, method: str, url: str, **kwargs):
-        """
-        Effectue une requête en appliquant automatiquement :
-        proxy rotatif + headers UA + retry/backoff adaptatif.
-        """
         if "headers" not in kwargs:
             kwargs["headers"] = self.get_headers()
         if "proxies" not in kwargs and self.proxy_rotator is not None:
@@ -613,143 +529,71 @@ class BotContext:
 
         if self.backoff is not None:
             return self.backoff.request(session, method, url, **kwargs)
-
-        # Sinon, simple requête
         return session.request(method, url, **kwargs)
 
     def sleep_jitter(self) -> float:
         return self.jitter.sleep() if self.jitter else 0.0
 
-    def mark_proxy_bad(self) -> None:
-        """Marque le proxy courant comme mauvais (à appeler après un 403/429)."""
-        if self.proxy_rotator is None:
+    def mark_current_proxy_bad(self, reason: str = "") -> None:
+        """
+        Marque KO le proxy RÉELLEMENT utilisé par ce worker (pas un autre).
+        À appeler après un 403/429/503 constaté sur la réponse.
+        """
+        if self.proxy_rotator is None or self._current_proxy_url is None:
             return
-        proxy = self.proxy_rotator.get_proxy()
-        if proxy:
-            self.proxy_rotator.mark_bad(proxy["http"])
+        self.proxy_rotator.mark_bad(self._current_proxy_url, reason=reason)
 
 
 # ---------------------------------------------------------------------------
-# Démo complète
+# Handler par défaut + démo
 # ---------------------------------------------------------------------------
 def _demo_handler(task: Task, ctx: BotContext) -> Dict[str, Any]:
-    """
-    Handler de démo : fait une requête GET sur task.url en utilisant tous les outils.
-    """
     import requests
     sess = requests.Session()
     try:
         resp = ctx.request(sess, "GET", task.url, timeout=10)
+        status = getattr(resp, "status_code", None)
+        if status in (403, 429, 503):
+            ctx.mark_current_proxy_bad(reason=f"HTTP {status}")
+        text = getattr(resp, "text", "") or ""
         return {
-            "status": resp.status_code,
-            "size": len(resp.text),
-            "url": resp.url,
+            "status": status,
+            "size": len(text),
+            "url": getattr(resp, "url", task.url),
             "worker": ctx.worker_id,
         }
     finally:
         sess.close()
 
 
-def demo():
-    from user_agent_rotator import UserAgentRotator
-    from delay_jitter import DelayJitter, RateLimiter
-    from adaptive_backoff import AdaptiveBackoff
-
-    ua = UserAgentRotator()
-    jitter = DelayJitter(min_delay=0.2, max_delay=1.0, mode="human")
-    limiter = RateLimiter(max_calls=5, period=1.0)
-    backoff = AdaptiveBackoff(strategy="adaptive", verbose=False)
-
-    urls = [f"https://httpbin.org/anything/{i}" for i in range(20)]
-
-    pool = DistributedBotPool(
-        tasks=urls,
-        handler=_demo_handler,
-        num_workers=4,
-        mode="thread",
-        shard_by="host",
-        ua_rotator=ua,
-        jitter=jitter,
-        rate_limiter=limiter,
-        backoff=backoff,
-        verbose=True,
-    )
-    pool.install_signal_handlers()
-
-    stats = pool.run(progress_every=3.0)
-    print("\n=== Résumé ===")
-    print(f"Durée    : {stats['duration']:.2f}s")
-    print(f"Réussis  : {stats['total_done']}")
-    print(f"Échoués  : {stats['total_failed']}")
-    for wid, s in stats["workers"].items():
-        print(f"  {wid}: {s}")
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    import argparse
+    import argparse, logging as _logging
+    p = argparse.ArgumentParser()
+    p.add_argument("--urls", nargs="*", help="URLs à traiter")
+    p.add_argument("--urls-file", help="Fichier texte (une URL par ligne)")
+    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--shard-by", choices=["host", "hash", "none"], default="host")
+    p.add_argument("--verbose", action="store_true")
+    args = p.parse_args()
 
-    parser = argparse.ArgumentParser(description="Orchestrateur de bots distribués.")
-    parser.add_argument("--urls", nargs="*", help="Liste d'URLs à traiter")
-    parser.add_argument("--urls-file", help="Fichier texte contenant une URL par ligne")
-    parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--mode", choices=["thread", "process", "async"], default="thread")
-    parser.add_argument("--shard-by", choices=["host", "hash", "none"], default="host")
-    parser.add_argument("--redis", action="store_true",
-                        help="Utiliser Redis comme file de tâches distribuée")
-    parser.add_argument("--redis-host", default="localhost")
-    parser.add_argument("--redis-port", type=int, default=6379)
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--demo", action="store_true")
-    args = parser.parse_args()
+    _logging.basicConfig(level=_logging.INFO,
+                         format="%(asctime)s %(levelname)s %(message)s")
 
-    if args.demo:
-        demo()
-        raise SystemExit(0)
-
-    # Charge les URLs
-    urls: List[str] = []
-    if args.urls:
-        urls.extend(args.urls)
+    urls: List[str] = list(args.urls or [])
     if args.urls_file:
         with open(args.urls_file) as f:
-            urls.extend(line.strip() for line in f if line.strip() and not line.startswith("#"))
+            urls.extend(l.strip() for l in f
+                        if l.strip() and not l.startswith("#"))
 
     if not urls:
-        print("Aucune URL fournie. Utilise --urls ou --urls-file, ou --demo.")
+        print("Aucune URL. Exemple : python distributed_bots.py --urls http://localhost/ --verbose")
         raise SystemExit(1)
 
-    # File de tâches
-    if args.redis:
-        queue_obj = RedisTaskQueue(host=args.redis_host, port=args.redis_port)
-    else:
-        queue_obj = None
-
-    # Instances compagnons (imports déjà faits en haut du module)
-    ua = UserAgentRotator() if UserAgentRotator else None
-    jitter = DelayJitter(min_delay=0.3, max_delay=1.5, mode="human") if DelayJitter else None
-    limiter = RateLimiter(max_calls=5, period=1.0) if RateLimiter else None
-    backoff = AdaptiveBackoff(strategy="adaptive") if AdaptiveBackoff else None
-
     pool = DistributedBotPool(
-        tasks=urls,
-        handler=_demo_handler,
-        num_workers=args.workers,
-        mode=args.mode,
-        shard_by=args.shard_by,
-        ua_rotator=ua,
-        jitter=jitter,
-        rate_limiter=limiter,
-        backoff=backoff,
-        task_queue=queue_obj,
-        verbose=args.verbose,
+        tasks=urls, handler=_demo_handler, num_workers=args.workers,
+        shard_by=args.shard_by, verbose=args.verbose,
     )
     pool.install_signal_handlers()
-
     stats = pool.run(progress_every=3.0)
-    print("\n=== Résumé ===")
-    print(f"Durée    : {stats['duration']:.2f}s")
-    print(f"Réussis  : {stats['total_done']}")
-    print(f"Échoués  : {stats['total_failed']}")
+    print(f"\nDurée: {stats['duration']:.2f}s | ok={stats['total_done']} "
+          f"ko={stats['total_failed']}")

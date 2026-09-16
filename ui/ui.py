@@ -1,148 +1,343 @@
+"""
+ui.py
+-----
+Interface TUI dédiée au module offensif (slowloris).
+
+Palette :
+  - cyan    : titres, valeurs neutres, bordures principales
+  - violet  : accents secondaires, labels, prompt
+  - vert    : état OK, sockets actives, succès
+  - rouge   : erreurs, bouton arrêt, bandeau critique
+  - jaune   : avertissements, alertes, cible en cours
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+import time
+from pathlib import Path
+from typing import Optional
+
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, Center
-from textual.widgets import Static, Footer
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import Static, Footer, Input, Label, Button
 from textual.binding import Binding
 from textual.screen import Screen
 
-from config import APP_NAME, VERSION, GITHUB_NAME
+
+# ─────────────────────────────────────────────────────────────
+#  Constantes
+# ─────────────────────────────────────────────────────────────
+APP_NAME = os.getenv("APP_NAME", "STRIKER")
+VERSION = os.getenv("VERSION", "0.1.0")
+GITHUB_NAME = os.getenv("GITHUB_NAME", "Aegon")
+
+_CSS_PATH = Path(__file__).with_name("tui.tcss")
+CSS_PATH = str(_CSS_PATH) if _CSS_PATH.exists() else None
 
 
-BANNER = r'''
-   ______      _ __             
-  / __/ /_____(_) /_____ ____   
- _\ \/ __/ __/ /  '_/ -_) __/   
-/___/\__/_/ /_/_/\_\\__/_/      
-                                
-'''
+BANNER = r"""
+   ______      _ __
+  / __/ /_____(_) /_____ ____
+ _\ \/ __/ __/ /  '_/ -_) __/
+/___/\__/_/ /_/_/\_\\__/_/
+"""
 
 
-class Home(Screen):
+# ─────────────────────────────────────────────────────────────
+#  État partagé avec le module DoS
+# ─────────────────────────────────────────────────────────────
+class OffensiveState:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.running: bool = False
+        self.target: str = ""
+        self.port: int = 80
+        self.threads: int = 10
+        self.sockets_per_thread: int = 50
+        self.keepalive_interval: float = 15.0
+        self.alive_sockets: int = 0
+        self.opened: int = 0
+        self.started_at: Optional[float] = None
+        self.last_message: str = ""
+        self.last_error: str = ""
+
+    def update(self, **kwargs) -> None:
+        with self._lock:
+            for k, v in kwargs.items():
+                if hasattr(self, k):
+                    setattr(self, k, v)
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "running": self.running,
+                "target": self.target,
+                "port": self.port,
+                "threads": self.threads,
+                "sockets_per_thread": self.sockets_per_thread,
+                "keepalive_interval": self.keepalive_interval,
+                "alive_sockets": self.alive_sockets,
+                "opened": self.opened,
+                "started_at": self.started_at,
+                "last_message": self.last_message,
+                "last_error": self.last_error,
+            }
+
+
+# ─────────────────────────────────────────────────────────────
+#  Écran principal (unique)
+# ─────────────────────────────────────────────────────────────
+class MainScreen(Screen):
     BINDINGS = [
-        Binding("1", "striker", "STRIKER"),
-        Binding("2", "settings", "SETTINGS"),
-        Binding("3", "quit_app", "QUIT"),
+        Binding("s", "start", "START"),
+        Binding("x", "stop", "STOP"),
+        Binding("c", "clear", "CLEAR"),
+        Binding("q", "quit_app", "QUIT"),
+        Binding("escape", "quit_app", "QUIT"),
     ]
 
     def compose(self) -> ComposeResult:
+        st = self.app.offensive_state.snapshot()
         yield Vertical(
             Static(BANNER, id="banner"),
-            Static(f"// BY Aegon    // v{VERSION}", id="byline"),
+            Static(f"// OFFENSIVE MODULE   // BY {GITHUB_NAME}   // v{VERSION}", id="byline"),
+
+            # Bandeau d'alerte permanent
+            Static(
+                "⚠  MODULE OFFENSIF — SLOWLORIS  ⚠\n"
+                "Utilisation sur cibles autorisées uniquement.\n"
+                "Vérifie le cadre légal et le périmètre avant de lancer.",
+                id="warning_banner",
+            ),
+
+            # Formulaire de configuration
             Horizontal(
                 Vertical(
-                    Static(
-                        "[ SYSTEM ]\n"
-                        "> INITIALIZING...\n"
-                        "> MODULES LOADED\n"
-                        "> NETWORK READY\n"
-                        "> STATUS: ONLINE",
-                        id="system_panel",
-                    ),
-                    Static(
-                        "[ GLOBAL STATUS ]\n"
-                        "IP      : 127.0.0.1\n"
-                        "PORT    : LOCAL\n"
-                        "STATUS  : ONLINE",
-                        id="status_panel",
-                    ),
-                    id="left",
+                    Label("CIBLE (IP)", classes="field_label"),
+                    Input(value=st["target"], placeholder="192.168.56.20", id="inp_target"),
+                    Label("PORT", classes="field_label"),
+                    Input(value=str(st["port"]), placeholder="80", id="inp_port"),
+                    Label("THREADS", classes="field_label"),
+                    Input(value=str(st["threads"]), placeholder="10", id="inp_threads"),
+                    id="form_left",
                 ),
                 Vertical(
-                    Static("[ STRIKER CONTROL PANEL ]", classes="panel_title"),
-                    Static("┌──────────────────────────────────────────┐\n│  [1]  OPEN STRIKER PAGE                  │\n└──────────────────────────────────────────┘", id="menu1"),
-                    Static("┌──────────────────────────────────────────┐\n│  [2]  SETTINGS                            │\n└──────────────────────────────────────────┘", id="menu2"),
-                    Static("┌──────────────────────────────────────────┐\n│  [3]  QUIT                               │\n└──────────────────────────────────────────┘", id="menu3"),
-                    Static("\n[ SELECT AN OPTION ]  1 / 2 / 3", id="prompt"),
-                    id="center",
+                    Label("SOCKETS / THREAD", classes="field_label"),
+                    Input(value=str(st["sockets_per_thread"]),
+                          placeholder="50", id="inp_spt"),
+                    Label("KEEPALIVE (s)", classes="field_label"),
+                    Input(value=str(st["keepalive_interval"]),
+                          placeholder="15", id="inp_interval"),
+                    Label("", classes="field_label"),
+                    Static("", id="spacer"),
+                    id="form_right",
                 ),
-                Vertical(
-                    Static(
-                        "[ STRIKER ]\n"
-                        "> DDOS MODULE\n"
-                        "> MULTI-THREAD\n"
-                        "> HIGH PERFORMANCE\n"
-                        "> CUSTOM CONFIG",
-                        id="modules",
-                    ),
-                    Static(
-                        "[ WARNING ]\n"
-                        "UI / CONTROL LAYER ONLY\n"
-                        "No attack implementation\n"
-                        "is included in this project.",
-                        id="warning",
-                    ),
-                    id="right",
-                ),
-                id="columns",
+                id="form_row",
             ),
-            Static(f"GITHUB // BY {GITHUB_NAME} // JUST CODE", id="footer"),
-            Footer(),
-        )
 
-    def action_striker(self) -> None:
-        self.app.push_screen(StrikerScreen())
+            # Boutons
+            Horizontal(
+                Button("DÉMARRER", id="btn_start", variant="success"),
+                Button("ARRÊTER", id="btn_stop", variant="error"),
+                Button("EFFACER", id="btn_clear"),
+                Button("QUITTER", id="btn_quit"),
+                id="buttons",
+            ),
 
-    def action_settings(self) -> None:
-        self.app.push_screen(SettingsScreen())
+            # Monitoring live
+            Static(self._render_status(), id="live"),
 
-    def action_quit_app(self) -> None:
-        self.app.exit()
+            # Message contextuel
+            Static("", id="flash"),
 
-
-class StrikerScreen(Screen):
-    BINDINGS = [Binding("escape", "back", "BACK"), Binding("3", "back", "BACK")]
-
-    def compose(self) -> ComposeResult:
-        yield Vertical(
-            Static(BANNER, id="banner"),
-            Static(f"// STRIKER // BY {GITHUB_NAME}", id="byline"),
             Static(
-                "[ STRIKER PAGE ]\n\n"
-                "SYSTEM      : READY\n"
-                "INTERFACE   : LOCAL TUI\n"
-                "NETWORK     : NOT CONFIGURED\n"
-                "ENGINE      : UI PLACEHOLDER\n\n"
-                "[ ESC ] BACK",
-                id="detail",
+                "\n[S] DÉMARRER   [X] ARRÊTER   [C] EFFACER   [Q] QUITTER",
+                id="help",
             ),
             Footer(),
         )
-
-    def action_back(self) -> None:
-        self.app.pop_screen()
-
-
-class SettingsScreen(Screen):
-    BINDINGS = [Binding("escape", "back", "BACK"), Binding("3", "back", "BACK")]
-
-    def compose(self) -> ComposeResult:
-        yield Vertical(
-            Static(BANNER, id="banner"),
-            Static(f"// SETTINGS // BY {GITHUB_NAME}", id="byline"),
-            Static(
-                "[ SETTINGS ]\n\n"
-                "HOST        : 127.0.0.1\n"
-                "WEB PORT    : 8080\n"
-                "THEME       : DEFAULT\n"
-                "ACCENT      : CYAN / PURPLE / GREEN\n"
-                "ERROR       : RED\n\n"
-                "These settings currently control the UI only.\n\n"
-                "[ ESC ] BACK",
-                id="detail",
-            ),
-            Footer(),
-        )
-
-    def action_back(self) -> None:
-        self.app.pop_screen()
-
-
-class StrikerTUI(App):
-    CSS_PATH = "tui.tcss"
-    TITLE = "STRIKER"
 
     def on_mount(self) -> None:
-        self.push_screen(Home())
+        self._dos = None
+        self._timer = self.set_interval(0.5, self._refresh)
+
+    # ------------------------------------------------------------------
+    def _render_status(self) -> str:
+        st = self.app.offensive_state.snapshot()
+        state = "RUNNING" if st["running"] else "IDLE"
+        uptime = ""
+        if st["started_at"] and st["running"]:
+            uptime = f"   UPTIME: {int(time.time() - st['started_at'])}s"
+        return (
+            "┌─[ ÉTAT ]────────────────────────────────────────────┐\n"
+            f"│  STATUT         : {state}{uptime}\n"
+            f"│  CIBLE          : {st['target']}:{st['port']}\n"
+            f"│  THREADS        : {st['threads']}\n"
+            f"│  SOCKETS/THREAD : {st['sockets_per_thread']}\n"
+            f"│  SOCKETS VIVES  : {st['alive_sockets']}\n"
+            f"│  OUVERTES       : {st['opened']}\n"
+            "└─────────────────────────────────────────────────────┘"
+        )
+
+    def _refresh(self) -> None:
+        if self._dos is not None:
+            try:
+                s = self._dos.stats()
+                self.app.offensive_state.update(
+                    alive_sockets=s["alive_sockets"],
+                    opened=s["opened"],
+                )
+                if not s["running"]:
+                    self.app.offensive_state.update(running=False)
+            except Exception:
+                pass
+
+        try:
+            self.query_one("#live", Static).update(self._render_status())
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    def _read_form(self) -> dict:
+        def _int(wid: str, default: int) -> int:
+            try:
+                return int(self.query_one(wid, Input).value or default)
+            except ValueError:
+                return default
+
+        def _float(wid: str, default: float) -> float:
+            try:
+                return float(self.query_one(wid, Input).value or default)
+            except ValueError:
+                return default
+
+        return {
+            "target": self.query_one("#inp_target", Input).value.strip(),
+            "port": _int("#inp_port", 80),
+            "threads": _int("#inp_threads", 10),
+            "sockets_per_thread": _int("#inp_spt", 50),
+            "keepalive_interval": _float("#inp_interval", 15.0),
+        }
+
+    # ------------------------------------------------------------------
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id
+        if bid == "btn_start":
+            self.action_start()
+        elif bid == "btn_stop":
+            self.action_stop()
+        elif bid == "btn_clear":
+            self.action_clear()
+        elif bid == "btn_quit":
+            self.action_quit_app()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        # Entrée dans un champ = démarrer
+        self.action_start()
+
+    # ------------------------------------------------------------------
+    def action_start(self) -> None:
+        form = self._read_form()
+        if not form["target"]:
+            self._flash("ERREUR : cible vide", level="error")
+            return
+
+        try:
+            from core.ddos import Dos  # import paresseux
+        except ImportError as e:
+            self._flash(f"ERREUR import : {e}", level="error")
+            return
+
+        try:
+            self._dos = Dos(
+                target_ip=form["target"],
+                target_port=form["port"],
+                threads=form["threads"],
+                sockets_per_thread=form["sockets_per_thread"],
+                keepalive_interval=form["keepalive_interval"],
+            )
+            self._dos.run()
+        except Exception as e:
+            self._flash(f"ERREUR lancement : {type(e).__name__}: {e}", level="error")
+            self._dos = None
+            return
+
+        self.app.offensive_state.update(
+            running=True,
+            target=form["target"],
+            port=form["port"],
+            threads=form["threads"],
+            sockets_per_thread=form["sockets_per_thread"],
+            keepalive_interval=form["keepalive_interval"],
+            started_at=time.time(),
+            last_message="running",
+            last_error="",
+        )
+        self._flash("DÉMARRÉ", level="ok")
+
+    def action_stop(self) -> None:
+        if self._dos is not None:
+            try:
+                self._dos.stop()
+            except Exception as e:
+                self._flash(f"ERREUR arrêt : {e}", level="error")
+        self.app.offensive_state.update(
+            running=False,
+            alive_sockets=0,
+            last_message="stopped",
+        )
+        self._flash("ARRÊTÉ", level="warn")
+
+    def action_clear(self) -> None:
+        for wid in ("#inp_target", "#inp_port", "#inp_threads",
+                    "#inp_spt", "#inp_interval"):
+            try:
+                self.query_one(wid, Input).value = ""
+            except Exception:
+                pass
+        self._flash("CHAMPS EFFACÉS", level="info")
+
+    def action_quit_app(self) -> None:
+        self.action_stop()
+        self.app.exit()
+
+    # ------------------------------------------------------------------
+    def _flash(self, message: str, level: str = "info") -> None:
+        """
+        Affiche un message contextuel coloré selon `level`.
+        level : 'ok' | 'warn' | 'error' | 'info'
+        """
+        try:
+            widget = self.query_one("#flash", Static)
+            widget.update(message)
+            # Classes CSS pour la couleur
+            widget.remove_class("flash-ok", "flash-warn",
+                                "flash-error", "flash-info")
+            widget.add_class(f"flash-{level}")
+        except Exception:
+            pass
 
 
-def run_tui():
+# ─────────────────────────────────────────────────────────────
+#  App
+# ─────────────────────────────────────────────────────────────
+class StrikerTUI(App):
+    CSS_PATH = CSS_PATH
+    TITLE = "STRIKER"
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.offensive_state = OffensiveState()
+
+    def on_mount(self) -> None:
+        self.push_screen(MainScreen())
+
+
+def run_tui() -> None:
     StrikerTUI().run()
+
+
+if __name__ == "__main__":
+    run_tui()

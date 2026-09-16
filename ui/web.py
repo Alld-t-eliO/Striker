@@ -6,7 +6,7 @@ from config import APP_NAME, VERSION, GITHUB_NAME, HOST, PORT
 app = FastAPI(title=APP_NAME)
 
 
-HTML = r'''<!doctype html>
+BASE_HTML = r'''<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -73,7 +73,6 @@ body:before{
 .menu strong{font-size:20px;letter-spacing:1px}
 pre{white-space:pre-wrap;line-height:1.45}
 .footer{text-align:center;color:var(--cyan);padding:25px;letter-spacing:3px}
-.hidden{display:none}
 @media(max-width:1000px){.grid{grid-template-columns:1fr}.hero{min-height:auto}.panel{min-height:auto}}
 </style>
 </head>
@@ -84,54 +83,9 @@ pre{white-space:pre-wrap;line-height:1.45}
     <span>LOCAL // JUST CODE</span>
   </div>
 
-  <section class="hero">
-    <div class="tag">/// CYBERPUNK CONTROL INTERFACE ///</div>
-    <h1>STRIKER</h1>
-    <div class="by">BY GitHub // {{GITHUB}}</div>
-  </section>
+  {{HERO}}
 
-  <div class="grid">
-    <aside>
-      <div class="panel">
-        <div class="title">[ SYSTEM ]</div>
-        <pre>> INITIALIZING...
-> MODULES LOADED
-> NETWORK READY
-> STATUS: ONLINE</pre>
-      </div>
-      <div class="panel">
-        <div class="title">[ LOCAL STATUS ]</div>
-        <pre>HOST   : 127.0.0.1
-PORT   : {{PORT}}
-STATUS : ONLINE</pre>
-      </div>
-    </aside>
-
-    <main class="panel">
-      <div class="title">[ STRIKER CONTROL PANEL ]</div>
-      <a class="menu" href="/striker"><span class="num">1</span><strong>OPEN STRIKER PAGE</strong><span>&gt;&gt;&gt;</span></a>
-      <a class="menu purple" href="/settings"><span class="num">2</span><strong>SETTINGS</strong><span>&gt;&gt;&gt;</span></a>
-      <a class="menu red" href="javascript:window.close()"><span class="num">3</span><strong>QUIT</strong><span>&gt;&gt;&gt;</span></a>
-      <div style="text-align:center;color:var(--green);padding:10px">[ SELECT AN OPTION ]</div>
-    </main>
-
-    <aside>
-      <div class="panel purple">
-        <div class="title" style="color:var(--purple)">[ STRIKER ]</div>
-        <pre>> CONTROL PANEL
-> MULTI-THREAD UI
-> CUSTOM CONFIG
-> LOCAL MODE</pre>
-      </div>
-      <div class="panel red">
-        <div class="title" style="color:var(--red)">[ WARNING ]</div>
-        <pre>UI / CONTROL LAYER ONLY
-
-No attack implementation
-is included in this project.</pre>
-      </div>
-    </aside>
-  </div>
+  {{GRID}}
 
   <div class="footer">GITHUB // BY {{GITHUB}} // JUST CODE</div>
 </div>
@@ -139,30 +93,83 @@ is included in this project.</pre>
 </html>'''
 
 
-def render(page: str = "home") -> str:
-    html = HTML.replace("{{VERSION}}", VERSION).replace("{{GITHUB}}", GITHUB_NAME).replace("{{PORT}}", str(PORT))
+HERO_HOME = '''<section class="hero">
+    <div class="tag">/// CYBERPUNK CONTROL INTERFACE ///</div>
+    <h1>STRIKER</h1>
+    <div class="by">BY GitHub // {{GITHUB}}</div>
+</section>'''
 
-    if page == "striker":
-        content = '''<section class="hero"><div class="tag">/// STRIKER PAGE ///</div><h1>STRIKER</h1><div class="by">SYSTEM READY // UI PLACEHOLDER</div></section>
-        <div class="grid"><main class="panel"><div class="title">[ STRIKER STATUS ]</div><pre>SYSTEM      : READY
+GRID_HOME = '''<div class="grid">
+  <aside>
+    <div class="panel">
+      <div class="title">[ SYSTEM ]</div>
+      <pre>&gt; INITIALIZING...
+&gt; MODULES LOADED
+&gt; NETWORK READY
+&gt; STATUS: ONLINE</pre>
+    </div>
+    <div class="panel">
+      <div class="title">[ LOCAL STATUS ]</div>
+      <pre>HOST   : 127.0.0.1
+PORT   : {{PORT}}
+STATUS : ONLINE</pre>
+    </div>
+  </aside>
+
+  <main class="panel">
+    <div class="title">[ STRIKER CONTROL PANEL ]</div>
+    <a class="menu" href="/striker"><span class="num">1</span><strong>OPEN STRIKER PAGE</strong><span>&gt;&gt;&gt;</span></a>
+    <a class="menu purple" href="/settings"><span class="num">2</span><strong>SETTINGS</strong><span>&gt;&gt;&gt;</span></a>
+    <a class="menu red" href="javascript:window.close()"><span class="num">3</span><strong>QUIT</strong><span>&gt;&gt;&gt;</span></a>
+    <div style="text-align:center;color:var(--green);padding:10px">[ SELECT AN OPTION ]</div>
+  </main>
+
+  <aside>
+    <div class="panel purple">
+      <div class="title" style="color:var(--purple)">[ STRIKER ]</div>
+      <pre>&gt; CONTROL PANEL
+&gt; MULTI-THREAD UI
+&gt; CUSTOM CONFIG
+&gt; LOCAL MODE</pre>
+    </div>
+    <div class="panel red">
+      <div class="title" style="color:var(--red)">[ WARNING ]</div>
+      <pre>UI / CONTROL LAYER ONLY
+
+No attack implementation
+is included in this project.</pre>
+    </div>
+  </aside>
+</div>'''
+
+HERO_STRIKER = '''<section class="hero">
+    <div class="tag">/// STRIKER PAGE ///</div>
+    <h1>STRIKER</h1>
+    <div class="by">SYSTEM READY // UI PLACEHOLDER</div>
+</section>'''
+
+GRID_STRIKER = '''<div class="grid">
+  <main class="panel" style="grid-column: 1 / -1;">
+    <div class="title">[ STRIKER STATUS ]</div>
+    <pre>SYSTEM      : READY
 INTERFACE   : LOCAL HTTP
 NETWORK     : NOT CONFIGURED
 ENGINE      : UI PLACEHOLDER
 
-<a style="color:var(--cyan)" href="/">[ BACK ]</a></pre></main></div>'''
-        return html.replace('<div class="frame">', '<div class="frame">', 1).replace(
-            '<div class="topbar">', '<div class="topbar"><span>STRIKER // CONTROL</span><span>LOCAL</span></div><div class="hidden">', 1
-        ).replace('</div>
-</body>', '</div>
-</body>', 1).replace(
-            '<section class="hero">', content + '<!--', 1
-        ).replace('</div>
-</body>', '--></div>
-</body>', 1)
+<a style="color:var(--cyan)" href="/">[ BACK ]</a></pre>
+  </main>
+</div>'''
 
-    if page == "settings":
-        return html.replace('<section class="hero">', '''<section class="hero"><div class="tag">/// SETTINGS ///</div><h1>SETTINGS</h1><div class="by">CYBERPUNK THEME</div></section>
-        <div class="grid"><main class="panel"><div class="title">[ CONFIGURATION ]</div><pre>HOST        : 127.0.0.1
+HERO_SETTINGS = '''<section class="hero">
+    <div class="tag">/// SETTINGS ///</div>
+    <h1>SETTINGS</h1>
+    <div class="by">CYBERPUNK THEME</div>
+</section>'''
+
+GRID_SETTINGS = '''<div class="grid">
+  <main class="panel" style="grid-column: 1 / -1;">
+    <div class="title">[ CONFIGURATION ]</div>
+    <pre>HOST        : 127.0.0.1
 WEB PORT    : 8080
 THEME       : DEFAULT
 ACCENT      : CYAN / PURPLE / GREEN
@@ -170,11 +177,28 @@ ERROR       : RED
 
 These values currently control the UI only.
 
-<a style="color:var(--cyan)" href="/">[ BACK ]</a></pre></main></div><!--''', 1).replace('</div>
-</body>', '--></div>
-</body>', 1)
+<a style="color:var(--cyan)" href="/">[ BACK ]</a></pre>
+  </main>
+</div>'''
 
-    return html
+
+def _apply_common(html: str) -> str:
+    return (html
+            .replace("{{VERSION}}", VERSION)
+            .replace("{{GITHUB}}", GITHUB_NAME)
+            .replace("{{PORT}}", str(PORT)))
+
+
+def render(page: str = "home") -> str:
+    if page == "striker":
+        hero, grid = HERO_STRIKER, GRID_STRIKER
+    elif page == "settings":
+        hero, grid = HERO_SETTINGS, GRID_SETTINGS
+    else:
+        hero, grid = HERO_HOME, GRID_HOME
+
+    html = BASE_HTML.replace("{{HERO}}", hero).replace("{{GRID}}", grid)
+    return _apply_common(html)
 
 
 @app.get("/", response_class=HTMLResponse)

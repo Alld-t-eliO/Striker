@@ -1,6 +1,6 @@
 import argparse
-from config import HOST, PORT
-from tui import run_tui
+from config import HOST, PORT  
+from ui import run_tui
 from web import run_web
 
 
