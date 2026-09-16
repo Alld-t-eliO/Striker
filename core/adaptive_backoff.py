@@ -1,26 +1,3 @@
-"""
-adaptive_backoff.py
--------------------
-Backoff adaptatif pour éviter la détection lors du scraping.
-
-Contrairement au backoff exponentiel fixe, ce module APPREND du serveur :
-- Lit Retry-After (429 / 503)
-- Observe la latence des réponses (signe de throttling silencieux)
-- Mesure le taux d'erreur glissant par domaine
-- Ajuste le délai selon plusieurs algorithmes : AIMD, PID, adaptatif simple
-- Détecte les réponses "pièges" (captcha, page de blocage)
-- Circuit breaker par domaine (coupe si trop d'erreurs)
-- Compatible avec ProxyRotator, UserAgentRotator, DelayJitter, RequestFragmenter
-
-Usage typique :
-    backoff = AdaptiveBackoff()
-    delay = backoff.on_success("api.exemple.com", latency=0.8)
-    time.sleep(delay)
-
-    delay = backoff.on_failure("api.exemple.com", status=429, retry_after=30)
-    time.sleep(delay)
-"""
-
 import time
 import random
 import math
@@ -30,28 +7,22 @@ from typing import Dict, Optional, Tuple, List
 from urllib.parse import urlparse
 from collections import deque
 
-
-# ---------------------------------------------------------------------------
-# État par domaine
-# ---------------------------------------------------------------------------
 @dataclass
 class DomainState:
-    """État adaptatif d'un domaine (host)."""
-    delay: float = 1.0                            # Délai courant recommandé (s)
-    base_delay: float = 1.0                       # Délai de base
-    min_delay: float = 0.2                        # Plancher
-    max_delay: float = 120.0                      # Plafond
-    success_streak: int = 0                       # Succès consécutifs
-    failure_streak: int = 0                       # Échecs consécutifs
+    delay: float = 1.0                           
+    base_delay: float = 1.0                     
+    min_delay: float = 0.2                        
+    max_delay: float = 120.0                     
+    success_streak: int = 0                      
+    failure_streak: int = 0                      
     total_requests: int = 0
     total_failures: int = 0
     latencies: deque = field(default_factory=lambda: deque(maxlen=50))
     error_timestamps: deque = field(default_factory=lambda: deque(maxlen=100))
-    circuit_open: bool = False                    # Circuit breaker
+    circuit_open: bool = False                   
     circuit_opened_at: float = 0.0
     last_update: float = field(default_factory=time.time)
     last_retry_after: Optional[float] = None
-    # PID
     integral: float = 0.0
     previous_error: float = 0.0
 
@@ -140,14 +111,10 @@ class AdaptiveBackoff:
 
     @staticmethod
     def host_of(url: str) -> str:
-        """Extrait le host d'une URL ou le retourne tel quel."""
         if "://" in url:
             return urlparse(url).netloc
         return url
 
-    # ------------------------------------------------------------------
-    # Application du jitter (cohérent avec delay_jitter.py)
-    # ------------------------------------------------------------------
     def _apply_jitter(self, delay: float) -> float:
         if self.jitter == "full":
             return random.uniform(0, delay)
@@ -159,18 +126,12 @@ class AdaptiveBackoff:
             return delay
         return delay
 
-    # ------------------------------------------------------------------
-    # Signaux d'entrée : succès / échec
-    # ------------------------------------------------------------------
     def on_success(self,
                    url_or_host: str,
                    latency: Optional[float] = None,
                    status: int = 200,
                    body: Optional[str] = None) -> float:
-        """
-        À appeler après une requête réussie.
-        Retourne le délai (avec jitter) à attendre avant la prochaine requête.
-        """
+
         host = self.host_of(url_or_host)
         with self._lock:
             st = self._state(host)
@@ -180,7 +141,6 @@ class AdaptiveBackoff:
             if latency is not None:
                 st.latencies.append(latency)
 
-            # Détection de page "piège" même avec status 200
             if body and self._is_suspect(body):
                 if self.verbose:
                     print(f"[backoff] {host}: page suspecte détectée malgré 200")
@@ -188,14 +148,11 @@ class AdaptiveBackoff:
                 st.error_timestamps.append(time.time())
                 return self._escalate(st, reason="suspect_page")
 
-            # Latence anormalement élevée = throttling silencieux probable
             if latency is not None and st.avg_latency > 0 and latency > st.avg_latency * 2.5:
                 if self.verbose:
                     print(f"[backoff] {host}: latence anormale ({latency:.2f}s vs {st.avg_latency:.2f}s)")
-                # On ralentit un peu mais sans escalade violente
                 st.delay = min(st.max_delay, st.delay * 1.3)
 
-            # Succès : on réduit le délai selon la stratégie
             self._decrease(st)
             st.last_update = time.time()
             delay = max(st.min_delay, min(st.max_delay, st.delay))
@@ -208,10 +165,7 @@ class AdaptiveBackoff:
                    status: Optional[int] = None,
                    retry_after: Optional[float] = None,
                    exception: Optional[Exception] = None) -> float:
-        """
-        À appeler après un échec (429, 503, timeout, etc.).
-        Retourne le délai à attendre avant de réessayer.
-        """
+        
         host = self.host_of(url_or_host)
         with self._lock:
             st = self._state(host)

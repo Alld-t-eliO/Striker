@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import uvicorn
-
 from config import APP_NAME, VERSION, GITHUB_NAME, HOST, PORT
 
 app = FastAPI(title=APP_NAME)
@@ -165,7 +164,7 @@ ENGINE      : UI PLACEHOLDER
         return html.replace('<section class="hero">', '''<section class="hero"><div class="tag">/// SETTINGS ///</div><h1>SETTINGS</h1><div class="by">CYBERPUNK THEME</div></section>
         <div class="grid"><main class="panel"><div class="title">[ CONFIGURATION ]</div><pre>HOST        : 127.0.0.1
 WEB PORT    : 8080
-THEME       : CYBERPUNK
+THEME       : DEFAULT
 ACCENT      : CYAN / PURPLE / GREEN
 ERROR       : RED
 
