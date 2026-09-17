@@ -162,9 +162,6 @@ def _default_scraping_handler(task: Task, ctx: BotContext) -> Dict[str, Any]:
         sess.close()
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  CLI
-# ═══════════════════════════════════════════════════════════════════
 def _run_dos(args) -> None:
     from core.ddos import Dos  
     dos = Dos(
