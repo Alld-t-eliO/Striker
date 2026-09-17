@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Callable
 from urllib.parse import urlparse, urlencode, quote
+
 from core.proxy_rotator import ProxyRotator
 from core.user_agent_rotator import UserAgentRotator
 from core.delay_jitter import DelayJitter, RateLimiter, backoff_delay
@@ -48,9 +49,6 @@ except ImportError:
     NODRIVER_AVAILABLE = False
 
 
-# ---------------------------------------------------------------------------
-# Modules compagnons (optionnels)
-# ---------------------------------------------------------------------------
 try:
     from proxy_rotator import ProxyRotator  # type: ignore
 except ImportError:
@@ -74,9 +72,6 @@ except ImportError:
     AdaptiveBackoff = None  # type: ignore
 
 
-# ---------------------------------------------------------------------------
-# Configuration du logging
-# ---------------------------------------------------------------------------
 logger = logging.getLogger("captcha_waf_bypass")
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -85,9 +80,6 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
 
 
-# ---------------------------------------------------------------------------
-# Énumérations
-# ---------------------------------------------------------------------------
 class ProtectionType(str, Enum):
     NONE = "none"
     CLOUDFLARE_JS = "cloudflare_js"
@@ -104,20 +96,15 @@ class ProtectionType(str, Enum):
 
 
 class SolveStrategy(str, Enum):
-    """Stratégie de résolution à utiliser."""
-    API_SERVICE = "api_service"      # Service de résolution (CapSolver, 2Captcha...)
-    BROWSER = "browser"              # Navigateur furtif (Playwright/nodriver)
-    CLOUDSCRAPER = "cloudscraper"    # Cloudscraper (challenges JS simples)
-    TLS_IMPERSONATE = "tls_impersonate"  # curl_cffi (empreinte TLS)
-    HYBRID = "hybrid"                # Combine plusieurs approches
+    API_SERVICE = "api_service"     
+    BROWSER = "browser"             
+    CLOUDSCRAPER = "cloudscraper"    
+    TLS_IMPERSONATE = "tls_impersonate"  
+    HYBRID = "hybrid"               
 
 
-# ---------------------------------------------------------------------------
-# Structures de données
-# ---------------------------------------------------------------------------
 @dataclass
 class ProtectionInfo:
-    """Résultat de la détection de protection."""
     type: ProtectionType = ProtectionType.NONE
     waf_name: Optional[str] = None
     captcha_site_key: Optional[str] = None
@@ -131,7 +118,6 @@ class ProtectionInfo:
 
 @dataclass
 class SolveResult:
-    """Résultat d'une tentative de résolution."""
     success: bool
     token: Optional[str] = None
     cookies: Optional[Dict[str, str]] = None
@@ -143,16 +129,7 @@ class SolveResult:
     error: Optional[str] = None
 
 
-# ---------------------------------------------------------------------------
-# Détecteur de protection
-# ---------------------------------------------------------------------------
 class ProtectionDetector:
-    """
-    Détecte le type de protection (CAPTCHA / WAF / challenge JS) à partir
-    d'une réponse HTTP, de son corps HTML et de ses en-têtes.
-    """
-
-    # Signatures WAF connues (en-têtes + body)
     WAF_SIGNATURES = {
         "cloudflare": [
             ("header", "cf-ray"),
@@ -194,7 +171,6 @@ class ProtectionDetector:
         ],
     }
 
-    # Signatures CAPTCHA
     CAPTCHA_SIGNATURES = {
         ProtectionType.RECAPTCHA_V2: [
             r'data-sitekey=["\']([^"\']+)["\']',
@@ -217,7 +193,6 @@ class ProtectionDetector:
         ],
     }
 
-    # Indices qu'un navigateur est nécessaire
     BROWSER_REQUIRED_PATTERNS = [
         "challenge-platform", "cf-challenge", "awswaf", "datadome",
         "captcha-delivery", "_abck", "incap_ses", "Just a moment",
@@ -225,9 +200,6 @@ class ProtectionDetector:
 
     @classmethod
     def detect(cls, response, body: Optional[str] = None) -> ProtectionInfo:
-        """
-        Analyse une réponse HTTP et retourne les informations de protection.
-        """
         info = ProtectionInfo()
         if response is None:
             return info
@@ -236,7 +208,6 @@ class ProtectionDetector:
         headers = {k.lower(): v for k, v in getattr(response, "headers", {}).items()}
         html = body if body is not None else getattr(response, "text", "") or ""
 
-        # 1) Détection WAF par en-têtes
         for waf_name, signatures in cls.WAF_SIGNATURES.items():
             for sig_type, pattern in signatures:
                 if sig_type == "header" and pattern.lower() in headers:
@@ -246,19 +217,16 @@ class ProtectionDetector:
                     info.waf_name = info.waf_name or waf_name
                     info.confidence = max(info.confidence, 0.6)
 
-        # 2) Détection CAPTCHA par regex dans le body
         for captcha_type, patterns in cls.CAPTCHA_SIGNATURES.items():
             for pattern in patterns:
                 match = re.search(pattern, html, re.IGNORECASE)
                 if match:
                     info.type = captcha_type
-                    # Essayer d'extraire la site key
                     if match.groups():
                         info.captcha_site_key = match.group(1)
                     info.confidence = max(info.confidence, 0.85)
                     break
 
-        # 3) Détection challenge JS générique
         if not info.type or info.type == ProtectionType.NONE:
             if any(p.lower() in html.lower() for p in cls.BROWSER_REQUIRED_PATTERNS):
                 info.type = ProtectionType.CLOUDFLARE_JS if "cloudflare" in (info.waf_name or "") else ProtectionType.GENERIC_WAF
@@ -266,39 +234,28 @@ class ProtectionDetector:
                 info.requires_browser = True
                 info.confidence = max(info.confidence, 0.7)
 
-        # 4) Extraction de la site key reCAPTCHA v3 (action)
         if info.type == ProtectionType.RECAPTCHA_V3 and not info.captcha_action:
             action_match = re.search(r'render=["\']([^"\']+)["\']', html)
             if action_match:
                 info.captcha_action = action_match.group(1)
 
-        # 5) Statuts HTTP typiques
         if status in (403, 503) and info.confidence < 0.5:
             info.type = ProtectionType.GENERIC_WAF
             info.confidence = 0.4
             info.requires_browser = True
 
-        # 6) Décision navigateur
         if info.type in (ProtectionType.CLOUDFLARE_JS, ProtectionType.AWS_WAF,
                          ProtectionType.DATADOME, ProtectionType.AKAMAI,
                          ProtectionType.IMPERVA):
             info.requires_browser = True
 
         if info.confidence > 0:
-            logger.debug(f"Protection détectée : {info.type.value} "
+            logger.debug(f"Protection detected : {info.type.value} "
                          f"(waf={info.waf_name}, conf={info.confidence:.2f})")
         return info
 
 
-# ---------------------------------------------------------------------------
-# Solveurs de CAPTCHA via API
-# ---------------------------------------------------------------------------
 class CaptchaSolverAPI:
-    """
-    Client unifié pour les services de résolution de CAPTCHA.
-    Supporte CapSolver, 2Captcha, Anti-Captcha via une interface commune.
-    """
-
     def __init__(self,
                  service: str = "capsolver",
                  api_key: Optional[str] = None,
@@ -316,7 +273,7 @@ class CaptchaSolverAPI:
         self.poll_interval = poll_interval
 
         if not self.api_key:
-            logger.warning(f"Aucune clé API fournie pour {self.service}.")
+            logger.warning(f"No API key found fournie for {self.service}.")
 
     def _env_key(self) -> Optional[str]:
         mapping = {
@@ -326,16 +283,13 @@ class CaptchaSolverAPI:
         }
         return os.getenv(mapping.get(self.service, "CAPTCHA_API_KEY"))
 
-    # ------------------------------------------------------------------
-    # API CapSolver
-    # ------------------------------------------------------------------
+
     def solve_capsolver(self,
                         captcha_type: str,
                         website_url: str,
                         website_key: Optional[str] = None,
                         page_action: Optional[str] = None,
                         extra: Optional[Dict] = None) -> SolveResult:
-        """Résout un CAPTCHA via CapSolver."""
         if requests is None:
             return SolveResult(success=False, error="requests non installé")
 
@@ -348,7 +302,6 @@ class CaptchaSolverAPI:
         if extra:
             task.update(extra)
 
-        # Créer la tâche
         try:
             r = requests.post(f"{base}/createTask",
                               json={"clientKey": self.api_key, "task": task},
@@ -364,7 +317,6 @@ class CaptchaSolverAPI:
         if not task_id:
             return SolveResult(success=False, error="taskId manquant")
 
-        # Polling
         start = time.time()
         while time.time() - start < self.timeout:
             time.sleep(self.poll_interval)
@@ -395,13 +347,9 @@ class CaptchaSolverAPI:
 
         return SolveResult(success=False, error="timeout de résolution")
 
-    # ------------------------------------------------------------------
-    # API 2Captcha
-    # ------------------------------------------------------------------
     def solve_2captcha(self,
                        method: str,
                        params: Dict[str, Any]) -> SolveResult:
-        """Résout un CAPTCHA via 2Captcha (in.php + res.php)."""
         if requests is None:
             return SolveResult(success=False, error="requests non installé")
 
@@ -439,22 +387,16 @@ class CaptchaSolverAPI:
 
         return SolveResult(success=False, error="timeout")
 
-    # ------------------------------------------------------------------
-    # Interface unifiée
-    # ------------------------------------------------------------------
+
     def solve(self,
               protection: ProtectionInfo,
               website_url: str,
               user_agent: Optional[str] = None) -> SolveResult:
-        """
-        Résout un CAPTCHA en fonction du type détecté.
-        """
         if not self.api_key:
             return SolveResult(success=False, error="clé API manquante")
 
         ptype = protection.type
 
-        # CapSolver
         if self.service == "capsolver":
             if ptype == ProtectionType.CLOUDFLARE_TURNSTILE:
                 return self.solve_capsolver(
@@ -478,11 +420,9 @@ class CaptchaSolverAPI:
             if ptype in (ProtectionType.DATADOME,):
                 return self.solve_capsolver("DatadomeSliderTask",
                                             website_url)
-            # Générique
             return self.solve_capsolver("ReCaptchaV2TaskProxyLess",
                                         website_url, protection.captcha_site_key)
 
-        # 2Captcha
         if self.service == "2captcha":
             if ptype == ProtectionType.RECAPTCHA_V2:
                 return self.solve_2captcha("userrecaptcha", {
@@ -514,15 +454,7 @@ class CaptchaSolverAPI:
         return SolveResult(success=False, error=f"type non supporté par {self.service}")
 
 
-# ---------------------------------------------------------------------------
-# Navigateur furtif (Playwright / nodriver)
-# ---------------------------------------------------------------------------
 class StealthBrowser:
-    """
-    Navigateur furtif pour résoudre les challenges JS et CAPTCHA complexes.
-    Utilise Playwright si disponible, sinon nodriver.
-    """
-
     def __init__(self,
                  headless: bool = True,
                  proxy: Optional[Dict[str, str]] = None,
@@ -543,10 +475,7 @@ class StealthBrowser:
                               solve_captcha: bool = False,
                               captcha_solver: Optional[CaptchaSolverAPI] = None,
                               protection: Optional[ProtectionInfo] = None) -> SolveResult:
-        """
-        Charge la page avec Playwright, attend que le challenge soit résolu,
-        et retourne les cookies + le HTML final.
-        """
+        
         if not PLAYWRIGHT_AVAILABLE:
             return SolveResult(success=False, error="Playwright non installé")
 
@@ -575,7 +504,6 @@ class StealthBrowser:
                 }
                 context = browser.new_context(**context_opts)
 
-                # Patch anti-détection
                 context.add_init_script("""
                     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                     Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
@@ -586,7 +514,6 @@ class StealthBrowser:
                 page = context.new_page()
                 page.goto(url, wait_until="domcontentloaded", timeout=self.timeout)
 
-                # Attendre que le challenge Cloudflare disparaisse
                 for _ in range(30):
                     content = page.content()
                     if not any(p in content for p in ["Checking your browser",
@@ -595,7 +522,6 @@ class StealthBrowser:
                         break
                     time.sleep(1)
 
-                # Attendre un sélecteur spécifique si fourni
                 for sel in wait_selectors:
                     try:
                         page.wait_for_selector(sel, timeout=10000)
@@ -603,11 +529,9 @@ class StealthBrowser:
                     except Exception:
                         continue
 
-                # Résoudre le CAPTCHA via API si demandé
                 if solve_captcha and captcha_solver and protection:
                     result = captcha_solver.solve(protection, url)
                     if result.success and result.token:
-                        # Injecter le token dans la page
                         token_js = f"""
                             (function() {{
                                 const token = "{result.token}";
@@ -960,21 +884,19 @@ class CaptchaWafBypass:
                                     ProtectionType.DATADOME)
                     and self.captcha_solver is not None
                     and protection.captcha_site_key):
-                logger.info(f"🔐 CAPTCHA détecté ({protection.type.value}), résolution via API...")
+                logger.info(f"[INFO] CAPTCHA detected ({protection.type.value}), resolution using API...")
                 solve_res = self.captcha_solver.solve(protection, url)
                 if solve_res.success and solve_res.token:
-                    # Soumettre le token
                     submit_resp = self._submit_captcha_token(
                         method, url, protection, solve_res, hdrs, proxies, **kwargs
                     )
                     if submit_resp is not None and submit_resp.status_code == 200:
-                        logger.info("✅ CAPTCHA résolu via API")
+                        logger.info("[SUCCESS] CAPTCHA resolved using API")
                         return submit_resp
                     last_response = submit_resp or last_response
                 else:
-                    logger.warning(f"Résolution API échouée : {solve_res.error}")
+                    logger.warning(f"API resolution failed: {solve_res.error}")
 
-            # 6) Challenge complexe -> navigateur furtif
             if (protection.requires_browser or protection.js_challenge
                     or protection.type in (ProtectionType.DATADOME,
                                            ProtectionType.AKAMAI,

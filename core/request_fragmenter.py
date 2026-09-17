@@ -42,6 +42,7 @@ class RequestFragmenter:
                  ua_rotator: Optional[Any] = None,
                  jitter: Optional[Any] = None,
                  rate_limiter: Optional[Any] = None,
+                 backoff: Optional[Any] = None,
                  max_retries: int = 3,
                  timeout: float = 15.0,
                  session: Optional[Any] = None):
@@ -54,6 +55,7 @@ class RequestFragmenter:
         self.rate_limiter = rate_limiter
         self.max_retries = max_retries
         self.timeout = timeout
+        self.backoff = backoff 
 
         if requests is None:
             raise ImportError("requests requis : pip install requests")

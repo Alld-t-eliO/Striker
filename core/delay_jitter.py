@@ -1,11 +1,4 @@
-"""
-delay_jitter.py
----------------
-Délais aléatoires (jitter) + rate limiter thread-safe.
-"""
-
 from __future__ import annotations
-
 import time
 import random
 import asyncio
@@ -15,7 +8,6 @@ from functools import wraps
 
 
 class DelayJitter:
-    """Générateur de délais aléatoires."""
 
     def __init__(self,
                  min_delay: float = 0.5,

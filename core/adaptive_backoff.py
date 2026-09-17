@@ -1,11 +1,4 @@
-"""
-adaptive_backoff.py
--------------------
-Backoff adaptatif multi-stratégies + circuit breaker.
-"""
-
 from __future__ import annotations
-
 import time
 import random
 import threading
@@ -47,9 +40,6 @@ class DomainState:
         return self.total_failures / self.total_requests
 
     def recent_error_rate(self, window: float = 60.0) -> float:
-        """
-        Vrai taux : (nb erreurs dans la fenêtre) / (nb requêtes dans la fenêtre).
-        """
         now = time.time()
         recent_errors = sum(1 for t in self.error_timestamps if now - t < window)
         recent_total = sum(1 for t in self.request_timestamps if now - t < window)
@@ -59,16 +49,6 @@ class DomainState:
 
 
 class AdaptiveBackoff:
-    """
-    Backoff adaptatif thread-safe.
-
-    Stratégies de diminution du délai après succès :
-      - aimd      : baisse additive après N succès consécutifs
-      - simple    : baisse multiplicative douce
-      - pid       : contrôleur PID visant un taux d'erreur cible
-      - adaptive  : baisse si taux d'erreur récent très faible
-    """
-
     def __init__(self,
                  strategy: str = "aimd",
                  base_delay: float = 1.0,
@@ -104,7 +84,6 @@ class AdaptiveBackoff:
         self._lock = threading.RLock()
         self._rng = random.Random()
 
-    # ------------------------------------------------------------------
     def _state(self, host: str) -> DomainState:
         if host not in self._states:
             self._states[host] = DomainState(
@@ -121,7 +100,6 @@ class AdaptiveBackoff:
             return urlparse(url).netloc or url
         return url
 
-    # ------------------------------------------------------------------
     def _apply_jitter(self, delay: float) -> float:
         if self.jitter == "full":
             return self._rng.uniform(0, delay)
@@ -133,7 +111,6 @@ class AdaptiveBackoff:
             return delay
         return delay
 
-    # ------------------------------------------------------------------
     def on_success(self,
                    url_or_host: str,
                    latency: Optional[float] = None,
@@ -149,13 +126,11 @@ class AdaptiveBackoff:
             if latency is not None:
                 st.latencies.append(latency)
 
-            # Page suspecte : traité comme un échec
             if body and self._is_suspect(body):
                 if self.verbose:
-                    print(f"[backoff] {host}: page suspecte malgré 200")
+                    print(f"[backoff] {host}: suspect page even if 200")
                 return self._escalate_locked(st, reason="suspect_page")
 
-            # Latence anormale : on augmente un peu
             if (latency is not None and st.avg_latency > 0
                     and latency > st.avg_latency * 2.5):
                 st.delay = min(st.max_delay, st.delay * 1.3)
@@ -183,7 +158,6 @@ class AdaptiveBackoff:
             st.error_timestamps.append(time.time())
             st.last_update = time.time()
 
-            # Retry-After prioritaire
             if retry_after is not None and retry_after > 0:
                 st.last_retry_after = retry_after
                 st.delay = max(st.delay, retry_after)
@@ -206,10 +180,9 @@ class AdaptiveBackoff:
 
             delay = max(st.min_delay, min(st.max_delay, st.delay))
             if self.verbose:
-                print(f"[backoff] {host}: ÉCHEC status={status} -> delay={delay:.2f}s")
+                print(f"[backoff] {host}: FAILED status={status} -> delay={delay:.2f}s")
             return self._apply_jitter(delay)
 
-    # ------------------------------------------------------------------
     def _decrease(self, st: DomainState) -> None:
         if self.strategy == "aimd":
             if st.success_streak >= 3:
@@ -228,7 +201,6 @@ class AdaptiveBackoff:
             correction = (self.pid_kp * err
                           + self.pid_ki * st.integral
                           + self.pid_kd * derivative)
-            # Correction bornée pour éviter les sauts
             st.delay = max(st.min_delay,
                            min(st.max_delay, st.delay + max(-2.0, min(2.0, correction))))
 
@@ -246,7 +218,7 @@ class AdaptiveBackoff:
         self._maybe_open_circuit(st)
         delay = max(st.min_delay, min(st.max_delay, st.delay))
         if self.verbose:
-            print(f"[backoff] escalade ({reason}) -> {delay:.2f}s")
+            print(f"[backoff] escalation ({reason}) -> {delay:.2f}s")
         return self._apply_jitter(delay)
 
     def _maybe_open_circuit(self, st: DomainState) -> None:
@@ -255,9 +227,8 @@ class AdaptiveBackoff:
             st.circuit_opened_at = time.time()
             st.delay = st.max_delay
             if self.verbose:
-                print(f"[backoff] CIRCUIT OUVERT ({st.failure_streak} échecs)")
+                print(f"[backoff] OPEN CIRCUIT ({st.failure_streak} failed)")
 
-    # ------------------------------------------------------------------
     def is_available(self, url_or_host: str) -> bool:
         host = self.host_of(url_or_host)
         with self._lock:
@@ -269,7 +240,7 @@ class AdaptiveBackoff:
                 st.failure_streak = 0
                 st.delay = st.base_delay
                 if self.verbose:
-                    print(f"[backoff] {host}: circuit refermé (cooldown)")
+                    print(f"[backoff] {host}: circuit closed (cooldown)")
                 return True
             return False
 
@@ -283,16 +254,14 @@ class AdaptiveBackoff:
                     return waited
                 remaining = self.circuit_cooldown - (time.time() - st.circuit_opened_at)
             if remaining <= 0:
-                # referme au prochain is_available
                 if self.is_available(host):
                     return waited
             sleep_time = min(max(remaining, 0.1), 5.0)
             if self.verbose:
-                print(f"[backoff] {host}: attente circuit {sleep_time:.1f}s")
+                print(f"[backoff] {host}: waiting circuit {sleep_time:.1f}s")
             time.sleep(sleep_time)
             waited += sleep_time
 
-    # ------------------------------------------------------------------
     def _is_suspect(self, body: str) -> bool:
         low = body.lower()
         return any(p in low for p in self.suspect_patterns)
@@ -313,7 +282,6 @@ class AdaptiveBackoff:
             except Exception:
                 return None
 
-    # ------------------------------------------------------------------
     def request(self, session, method: str, url: str,
                 max_retries: int = 5, **kwargs):
         host = self.host_of(url)
@@ -357,7 +325,6 @@ class AdaptiveBackoff:
                     time.sleep(delay)
                     continue
 
-                # Autres codes = succès (404, 400...)
                 delay = self.on_success(host, latency=latency, status=status)
                 time.sleep(delay)
                 return resp
@@ -370,14 +337,13 @@ class AdaptiveBackoff:
                 time.sleep(delay)
 
         if self.verbose:
-            print(f"[backoff] {host}: échec après {max_retries} tentatives")
+            print(f"[backoff] {host}: failed after {max_retries} attempts")
         if last_resp is not None:
             return last_resp
         if last_exc:
             raise last_exc
         return None
 
-    # ------------------------------------------------------------------
     def stats(self) -> Dict[str, Dict]:
         with self._lock:
             return {
@@ -403,7 +369,6 @@ class AdaptiveBackoff:
 
 
 def adaptive_backoff(backoff: "AdaptiveBackoff", session=None):
-    """Décorateur : applique le backoff à func(method, url, **kwargs)."""
     def decorator(func):
         def wrapper(method: str, url: str, **kwargs):
             sess = session
@@ -444,4 +409,4 @@ if __name__ == "__main__":
         for k, v in bo.stats().items():
             print(f"  {k}: {v}")
     else:
-        print(f"AdaptiveBackoff prêt (strategy={args.strategy})")
+        print(f"AdaptiveBackoff ready (strategy={args.strategy})")

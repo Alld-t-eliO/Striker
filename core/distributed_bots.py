@@ -1,11 +1,4 @@
-"""
-distributed_bots.py
--------------------
-Orchestrateur de workers multi-thread avec file in-memory ou Redis.
-"""
-
 from __future__ import annotations
-
 import time
 import uuid
 import threading
@@ -26,9 +19,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Structures
-# ---------------------------------------------------------------------------
 class TaskStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -61,7 +51,6 @@ class Task:
     shard_key: Optional[str] = None
 
     def clone_for_retry(self) -> "Task":
-        """Nouvelle instance pour la file de retry (résultat non transporté)."""
         return Task(
             id=self.id,
             url=self.url,
@@ -87,9 +76,6 @@ class WorkerInfo:
     current_proxy: Optional[str] = None
 
 
-# ---------------------------------------------------------------------------
-# Files de tâches
-# ---------------------------------------------------------------------------
 class InMemoryTaskQueue:
     def __init__(self):
         self._q: "queue.Queue[Task]" = queue.Queue()
@@ -116,11 +102,6 @@ class InMemoryTaskQueue:
 
 
 class RedisTaskQueue:
-    """
-    File distribuée via Redis.
-    Le résultat n'est PAS sérialisé dans la file (évite la saturation).
-    """
-
     def __init__(self, host: str = "localhost", port: int = 6379,
                  db: int = 0, key: str = "bot:tasks"):
         try:
@@ -173,10 +154,7 @@ class RedisTaskQueue:
         return self.qsize() == 0
 
 
-# ---------------------------------------------------------------------------
-# Pool
-# ---------------------------------------------------------------------------
-class DistributedBotPool:
+class WorkerPool:
     def __init__(self,
                  tasks: Optional[Iterable[Any]] = None,
                  handler: Optional[Callable[[Task, "BotContext"], Any]] = None,
@@ -222,7 +200,6 @@ class DistributedBotPool:
             for t in tasks:
                 self.add_task(t)
 
-    # ------------------------------------------------------------------
     def _normalize_task(self, item: Any) -> Task:
         if isinstance(item, Task):
             task = item
@@ -273,21 +250,12 @@ class DistributedBotPool:
             pool=self,
         )
 
-    # ------------------------------------------------------------------
-    # Décision d'arrêt
-    # ------------------------------------------------------------------
     def _should_stop(self) -> bool:
-        """
-        À appeler sous verrou. Vrai si la file est vide ET aucun worker BUSY.
-        """
         if not self.queue.empty():
             return False
         return not any(w.status == WorkerStatus.BUSY
                        for w in self.workers.values())
 
-    # ------------------------------------------------------------------
-    # Boucle worker
-    # ------------------------------------------------------------------
     def _worker_loop(self, worker_id: str) -> None:
         info = WorkerInfo(id=worker_id)
         with self._lock:
@@ -317,7 +285,6 @@ class DistributedBotPool:
             ctx = self._build_context(worker_id, task)
 
             try:
-                # Circuit breaker global
                 if self.backoff is not None:
                     if not self.backoff.is_available(task.url):
                         self.backoff.wait_if_blocked(task.url)
@@ -389,9 +356,6 @@ class DistributedBotPool:
             logger.info("[pool] worker %s arrêté (%d ok / %d ko)",
                         worker_id, info.tasks_done, info.tasks_failed)
 
-    # ------------------------------------------------------------------
-    # Lancement
-    # ------------------------------------------------------------------
     def run(self, progress_every: float = 5.0) -> Dict[str, Any]:
         self._stop_event.clear()
         self.results.clear()
@@ -443,7 +407,6 @@ class DistributedBotPool:
         for t in threads:
             t.join()
 
-    # ------------------------------------------------------------------
     def _monitor(self, stop_event: threading.Event, every: float) -> None:
         while not stop_event.wait(every):
             with self._lock:
@@ -455,7 +418,6 @@ class DistributedBotPool:
                         self.queue.qsize(), active, self.num_workers,
                         done, failed)
 
-    # ------------------------------------------------------------------
     def stop(self) -> None:
         self._stop_event.set()
 
@@ -482,9 +444,6 @@ class DistributedBotPool:
             }
 
 
-# ---------------------------------------------------------------------------
-# Contexte
-# ---------------------------------------------------------------------------
 class BotContext:
     def __init__(self,
                  worker_id: str,
@@ -494,7 +453,7 @@ class BotContext:
                  jitter: Optional[Any] = None,
                  rate_limiter: Optional[Any] = None,
                  backoff: Optional[Any] = None,
-                 pool: Optional[DistributedBotPool] = None):
+                 pool: Optional[WorkerPool] = None):
         self.worker_id = worker_id
         self.task = task
         self.proxy_rotator = proxy_rotator
@@ -503,8 +462,6 @@ class BotContext:
         self.rate_limiter = rate_limiter
         self.backoff = backoff
         self.pool = pool
-        # Mémorise le proxy courant pour ne pas en tirer un autre
-        # au moment de marquer 'bad'
         self._current_proxy_url: Optional[str] = None
 
     def get_proxies(self) -> Optional[Dict[str, str]]:
@@ -535,20 +492,13 @@ class BotContext:
         return self.jitter.sleep() if self.jitter else 0.0
 
     def mark_current_proxy_bad(self, reason: str = "") -> None:
-        """
-        Marque KO le proxy RÉELLEMENT utilisé par ce worker (pas un autre).
-        À appeler après un 403/429/503 constaté sur la réponse.
-        """
         if self.proxy_rotator is None or self._current_proxy_url is None:
             return
         self.proxy_rotator.mark_bad(self._current_proxy_url, reason=reason)
 
 
-# ---------------------------------------------------------------------------
-# Handler par défaut + démo
-# ---------------------------------------------------------------------------
 def _demo_handler(task: Task, ctx: BotContext) -> Dict[str, Any]:
-    import requests
+    import requests 
     sess = requests.Session()
     try:
         resp = ctx.request(sess, "GET", task.url, timeout=10)
@@ -589,7 +539,7 @@ if __name__ == "__main__":
         print("Aucune URL. Exemple : python distributed_bots.py --urls http://localhost/ --verbose")
         raise SystemExit(1)
 
-    pool = DistributedBotPool(
+    pool = WorkerPool(
         tasks=urls, handler=_demo_handler, num_workers=args.workers,
         shard_by=args.shard_by, verbose=args.verbose,
     )
