@@ -57,7 +57,7 @@ class DelayJitter:
                 return self._rng.uniform(lo, min(hi, lo + (hi - lo) * 0.4))
             return self._rng.uniform(lo + (hi - lo) * 0.4, hi)
 
-        raise ValueError(f"Mode inconnu : {self.mode}")
+        raise ValueError(f"Unknown mode : {self.mode}")
 
     def get(self) -> float:
         return self._compute()
@@ -79,7 +79,6 @@ def backoff_delay(attempt: int,
                   max_delay: float = 60.0,
                   jitter: str = "full",
                   min_delay: float = 0.1) -> float:
-    """Backoff exponentiel avec jitter. Jamais < min_delay (évite busy-loop)."""
     raw = min(max_delay, base * (factor ** attempt))
 
     if jitter == "full":
@@ -94,11 +93,6 @@ def backoff_delay(attempt: int,
 
 
 class RateLimiter:
-    """
-    Limite à `max_calls` appels par `period` secondes.
-    Thread-safe : utilisable depuis DistributedBotPool.
-    """
-
     def __init__(self, max_calls: int = 5, period: float = 1.0):
         if max_calls <= 0 or period <= 0:
             raise ValueError("max_calls et period doivent être > 0")
@@ -108,7 +102,6 @@ class RateLimiter:
         self._lock = threading.Lock()
 
     def wait(self) -> float:
-        """Bloque si nécessaire. Retourne le temps d'attente effectif."""
         waited = 0.0
         with self._lock:
             now = time.time()
@@ -117,7 +110,6 @@ class RateLimiter:
                 sleep_time = self.period - (now - self._calls[0])
                 if sleep_time > 0:
                     waited = sleep_time
-            # Ajout immédiat pour réserver le slot AVANT de dormir
             self._calls.append(time.time() + waited)
         if waited > 0:
             time.sleep(waited)

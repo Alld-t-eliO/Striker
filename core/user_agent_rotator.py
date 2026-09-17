@@ -1,11 +1,4 @@
-"""
-user_agent_rotator.py
----------------------
-Rotation de User-Agents + headers navigateur cohérents.
-"""
-
 from __future__ import annotations
-
 import random
 from itertools import cycle
 from typing import Dict, List, Optional
@@ -25,7 +18,6 @@ DEFAULT_USER_AGENTS: List[str] = [
     "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
 ]
 
-# Headers de base pour un GET navigateur réaliste
 BROWSER_HEADERS_CHROMIUM: Dict[str, str] = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -65,7 +57,6 @@ def _detect_family(ua: str) -> str:
     return "unknown"
 
 
-# Mapping famille -> profil curl_cffi cohérent (TLS/JA3)
 CURL_CFFI_PROFILE_BY_FAMILY = {
     "chrome": "chrome124",
     "edge": "edge101",
@@ -76,11 +67,6 @@ CURL_CFFI_PROFILE_BY_FAMILY = {
 
 
 class UserAgentRotator:
-    """
-    Rotation d'UA + headers navigateur cohérents.
-    Instance-scoped RNG (n'affecte pas random.seed global).
-    """
-
     def __init__(self,
                  user_agents: Optional[List[str]] = None,
                  ua_file: Optional[str] = None,
@@ -107,7 +93,6 @@ class UserAgentRotator:
         self._cycle = cycle(self.user_agents)
         self._current: str = self.user_agents[0]
 
-    # ------------------------------------------------------------------
     def get(self) -> str:
         if self.rotation == "round-robin":
             self._current = next(self._cycle)
@@ -134,7 +119,6 @@ class UserAgentRotator:
         return headers
 
     def get_curl_cffi_profile(self) -> str:
-        """Retourne le profil curl_cffi cohérent avec l'UA courant."""
         return CURL_CFFI_PROFILE_BY_FAMILY.get(_detect_family(self._current), "chrome124")
 
     @property

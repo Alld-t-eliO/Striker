@@ -25,7 +25,7 @@ class ProxyRotator:
         if proxy_file:
             self.load_from_file(proxy_file)
         if not self.proxies:
-            raise ValueError("Aucun proxy fourni.")
+            raise ValueError("No proxy given.")
 
         self.rotation = rotation.lower()
         self.bad_ttl = bad_ttl
@@ -33,18 +33,12 @@ class ProxyRotator:
 
         self._cycle = cycle(self.proxies)
         self._lock = threading.Lock()
-
-        # proxy_url -> timestamp du marquage KO
         self._bad_until: Dict[str, float] = {}
-        # bans permanents
         self._permanent_bad: set = set()
         self.stats: Dict[str, Dict[str, int]] = {
             p: {"ok": 0, "ko": 0} for p in self.proxies
         }
 
-    # ------------------------------------------------------------------
-    # Chargement
-    # ------------------------------------------------------------------
     def load_from_file(self, filepath: str) -> None:
         with open(filepath, "r", encoding="utf-8") as f:
             for line in f:
@@ -52,9 +46,6 @@ class ProxyRotator:
                 if line and not line.startswith("#"):
                     self.proxies.append(line)
 
-    # ------------------------------------------------------------------
-    # État interne
-    # ------------------------------------------------------------------
     def _is_available(self, proxy: str) -> bool:
         if proxy in self._permanent_bad:
             return False
@@ -62,7 +53,6 @@ class ProxyRotator:
         if until is None:
             return True
         if time.time() >= until:
-            # Réhabilitation : on nettoie l'entrée
             self._bad_until.pop(proxy, None)
             return True
         return False
@@ -70,11 +60,7 @@ class ProxyRotator:
     def _available_list(self) -> List[str]:
         return [p for p in self.proxies if self._is_available(p)]
 
-    # ------------------------------------------------------------------
-    # Sélection
-    # ------------------------------------------------------------------
     def get_proxy(self) -> Optional[Dict[str, str]]:
-        """Retourne un dict {'http':..., 'https':...} ou None si aucun dispo."""
         with self._lock:
             available = self._available_list()
             if not available:
@@ -92,9 +78,6 @@ class ProxyRotator:
                     proxy = available[0]
         return {"http": proxy, "https": proxy}
 
-    # ------------------------------------------------------------------
-    # Marquage
-    # ------------------------------------------------------------------
     def mark_bad(self, proxy_url: str,
                  permanent: bool = False,
                  reason: str = "") -> None:
@@ -102,11 +85,11 @@ class ProxyRotator:
             self.stats.setdefault(proxy_url, {"ok": 0, "ko": 0})["ko"] += 1
             if permanent:
                 self._permanent_bad.add(proxy_url)
-                logger.warning("Proxy BANNI définitivement : %s (%s)",
+                logger.warning("Proxy BANNED definitively : %s (%s)",
                                proxy_url, reason or "n/a")
             else:
                 self._bad_until[proxy_url] = time.time() + self.bad_ttl
-                logger.info("Proxy KO temporaire (%ss) : %s (%s)",
+                logger.info("Proxy Down temporaly (%ss) : %s (%s)",
                             int(self.bad_ttl), proxy_url, reason or "n/a")
 
     def mark_good(self, proxy_url: str) -> None:
@@ -114,32 +97,25 @@ class ProxyRotator:
             self.stats.setdefault(proxy_url, {"ok": 0, "ko": 0})["ok"] += 1
 
     def reset_bad(self) -> None:
-        """Réhabilite tous les proxies (hors bans permanents)."""
         with self._lock:
             self._bad_until.clear()
 
-    # ------------------------------------------------------------------
-    # Requête avec rotation + retry
-    # ------------------------------------------------------------------
     def request(self, method: str, url: str,
                 max_retries: int = 3,
                 timeout: Optional[float] = None,
                 **kwargs):
-        """
-        Effectue une requête en tournant sur les proxies.
-        Le timeout est fixé UNE FOIS (ne fuit plus entre tentatives).
-        """
+
         try:
             import requests
         except ImportError:
-            raise RuntimeError("requests requis")
+            raise RuntimeError("requests required")
 
         to = timeout if timeout is not None else self.timeout
 
         for attempt in range(max_retries):
             proxy_dict = self.get_proxy()
             if not proxy_dict:
-                logger.error("Plus de proxies disponibles.")
+                logger.error("No proxies available.")
                 return None
             proxy_url = proxy_dict["http"]
 
@@ -162,14 +138,10 @@ class ProxyRotator:
 
             except Exception as e:
                 self.mark_bad(proxy_url, reason=type(e).__name__)
-                # backoff minimal entre tentatives, sans jitter ici
                 time.sleep(min(2 ** attempt, 5))
 
         return None
 
-    # ------------------------------------------------------------------
-    # Health check
-    # ------------------------------------------------------------------
     def test_proxy(self, proxy_url: str,
                    test_url: str = "http://httpbin.org/ip",
                    timeout: float = 5.0) -> bool:
@@ -190,7 +162,6 @@ class ProxyRotator:
 
 
 if __name__ == "__main__":
-    # Démo sans cible externe : nécessite une liste de proxies en argument
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--proxies-file", required=True)
@@ -199,4 +170,4 @@ if __name__ == "__main__":
 
     rot = ProxyRotator(proxy_file=args.proxies_file, rotation="random")
     resp = rot.request("GET", args.url)
-    print(resp.json() if resp else "Échec")
+    print(resp.json() if resp else "Failed")
