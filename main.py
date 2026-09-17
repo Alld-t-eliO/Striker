@@ -227,7 +227,7 @@ def _cmd_scrape(args) -> None:
         with open(args.urls_file) as f:
             urls.extend(l.strip() for l in f if l.strip() and not l.startswith("#"))
     if not urls:
-        print("Aucune URL.")
+        print("No URL.")
         return
 
     stack = ScrapingStack(
@@ -239,16 +239,14 @@ def _cmd_scrape(args) -> None:
         verbose=args.verbose,
     )
     try:
-        if len(urls) == 1:
-            resp = stack.fetch("GET", urls[0])
-            if resp is not None:
-                print(f"Status : {resp.status_code}")
-                print(f"Taille : {len(resp.text)}")
-                print(resp.text[:500])
-        else:
-            stats = stack.fetch_many(urls, workers=args.workers)
-            print(f"\nDurée: {stats['duration']:.2f}s | ok={stats['total_done']} "
-                  f"ko={stats['total_failed']}")
+        stats = stack.fetch_many(urls, workers=max(1, args.workers))
+        print(f"\nDuration: {stats['duration']:.2f}s | "
+              f"ok={stats['total_done']} ko={stats['total_failed']}")
+
+        if args.verbose and len(urls) == 1 and stats["results"]:
+            r = stats["results"][0]
+            print(f"\nURL: {r.url}")
+            print(f"Result: {r.result}")
     finally:
         stack.close()
 
