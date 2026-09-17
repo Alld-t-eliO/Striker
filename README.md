@@ -77,32 +77,6 @@ Striker is **not** a weaponized DDoS platform. It does not ship with botnet capa
 
 ---
 
-## Architecture
-striker/
-├── main.py # CLI entry point (scrape / dos subcommands)
-├── ui/
-│ └── ui.py # Textual TUI (offensive module)
-│ └── tui.tcss # Theme and layout
-├── core/
-│ ├── init.py
-│ ├── ddos.py # Slowloris implementation
-│ ├── proxy_rotator.py # Proxy rotation + health tracking
-│ ├── user_agent_rotator.py # UA + browser header rotation
-│ ├── delay_jitter.py # Delay generation + rate limiting
-│ ├── adaptive_backoff.py # Backoff strategies + circuit breaker
-│ ├── request_fragmenter.py # Chunked uploads + pagination
-│ ├── distributed_bots.py # Worker pool orchestrator
-│ ├── captcha_waf_bypass.py # CAPTCHA / WAF detection and solving
-│ └── settings.py # Shared configuration
-├── requirements.txt
-└── README.md
-
-text
-
-Each module is independently importable and testable. There are no hidden global side effects at import time.
-
----
-
 ## Installation
 
 ### Requirements
