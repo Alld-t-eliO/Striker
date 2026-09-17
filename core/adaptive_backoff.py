@@ -8,6 +8,11 @@ from urllib.parse import urlparse
 from collections import deque
 
 
+SUCCESS_CODES = {200, 201, 202, 204}
+NEUTRAL_CODES = {400, 404, 405, 406, 410}
+ERROR_CODES = {401, 403, 429, 500, 502, 503, 504}
+
+
 @dataclass
 class DomainState:
     delay: float = 1.0
@@ -298,7 +303,7 @@ class AdaptiveBackoff:
                 status = resp.status_code
                 body = getattr(resp, "text", "") or ""
 
-                if status in (200, 201, 202, 204):
+                if status in SUCCESS_CODES or status in NEUTRAL_CODES:
                     delay = self.on_success(
                         host, latency=latency, status=status,
                         body=body[:5000],
