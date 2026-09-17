@@ -1,12 +1,4 @@
-"""
-proxy_rotator.py
-----------------
-Rotation de proxies thread-safe, avec TTL de réhabilitation et
-distinction erreurs temporaires / permanentes.
-"""
-
 from __future__ import annotations
-
 import threading
 import time
 import random
@@ -16,22 +8,11 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-
-# Codes HTTP qui justifient de marquer un proxy comme temporairement KO
-TRANSIENT_HTTP = {403, 429, 503, 502, 504}
-# Codes qui justifient un ban permanent (proxy clairement blacklisté)
-PERMANENT_HTTP = {407, 511}
+TRANSIENT_HTTP = {403, 407, 429, 502, 503, 504}
+PERMANENT_HTTP = {511}
 
 
 class ProxyRotator:
-    """
-    Rotation de proxies avec état thread-safe.
-
-    - 'bad' = marqué KO, exclu pendant `bad_ttl` secondes
-    - après `bad_ttl`, le proxy redevient candidat (réhabilitation douce)
-    - les bans permanents (407/511) restent exclus jusqu'à reset
-    """
-
     def __init__(self,
                  proxies: Optional[List[str]] = None,
                  proxy_file: Optional[str] = None,
