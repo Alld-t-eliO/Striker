@@ -77,8 +77,6 @@ Striker is **not** a weaponized DDoS platform. It does not ship with botnet capa
 
 ---
 
-## Installation
-
 ### Requirements
 
 - Python **3.10+** (uses modern type hints and dataclasses)
