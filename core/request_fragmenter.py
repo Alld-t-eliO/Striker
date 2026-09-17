@@ -1,21 +1,4 @@
-"""
-request_fragmenter.py
----------------------
-Outils de découpage de requêtes HTTP.
-
-IMPORTANT — Contrat serveur :
-  Les méthodes 'upload_in_chunks' et 'stream_in_chunks' ne fonctionnent QUE
-  si la cible expose un endpoint capable de RÉASSEMBLER les morceaux
-  (champ X-Chunk-Index / X-Chunk-Total, ou Transfer-Encoding: chunked natif).
-  Contre un serveur qui ne sait pas réassembler, ces appels produisent
-  N requêtes indépendantes (bruit réseau), pas un upload fragmenté.
-
-Ce module est conçu pour tester tes propres services avec un endpoint
-dédié au chunked upload, pas pour fragmenter du trafic vers des tiers.
-"""
-
 from __future__ import annotations
-
 import json
 import time
 import logging
@@ -76,9 +59,6 @@ class RequestFragmenter:
             raise ImportError("requests requis : pip install requests")
         self.session = session or requests.Session()
 
-    # ------------------------------------------------------------------
-    # 1) Découpage de payload (nécessite endpoint récepteur)
-    # ------------------------------------------------------------------
     def fragment_payload(self, payload: Any) -> List[bytes]:
         data = _serialize(payload)
         return [data[i:i + self.chunk_size]
@@ -89,10 +69,7 @@ class RequestFragmenter:
                          payload: Any,
                          method: str = "POST",
                          extra_headers: Optional[Dict[str, str]] = None) -> List[Any]:
-        """
-        Envoie un payload en plusieurs requêtes séquentielles, indexées.
-        Le serveur DOIT réassembler via X-Chunk-Index / X-Chunk-Total.
-        """
+
         chunks = self.fragment_payload(payload)
         total = len(chunks)
         responses = []
@@ -115,10 +92,7 @@ class RequestFragmenter:
                          payload: Any,
                          method: str = "POST",
                          extra_headers: Optional[Dict[str, str]] = None) -> Any:
-        """
-        Streaming HTTP natif (Transfer-Encoding: chunked).
-        Le serveur DOIT supporter le chunked transfer-encoding.
-        """
+
         chunks = self.fragment_payload(payload)
         headers = self._build_headers(extra_headers)
         headers["Content-Type"] = "application/octet-stream"
@@ -129,19 +103,12 @@ class RequestFragmenter:
 
         return self._request_with_retry(method, url, data=gen(), headers=headers)
 
-    # ------------------------------------------------------------------
-    # 2) Découpage des paramètres (split, PAS fragmentation)
-    # ------------------------------------------------------------------
     def split_params(self,
                      url: str,
                      params: Dict[str, Any],
                      method: str = "GET",
                      extra_headers: Optional[Dict[str, str]] = None) -> List[Any]:
-        """
-        Envoie les paramètres en plusieurs requêtes.
-        ATTENTION : la réponse n'a de sens que si le serveur accepte
-        des paramètres partiels (API tolérante).
-        """
+
         items = list(params.items())
         batches = list(_chunks(items, self.max_params_per_request))
         responses = []
@@ -154,9 +121,6 @@ class RequestFragmenter:
             responses.append(resp)
         return responses
 
-    # ------------------------------------------------------------------
-    # 3) Pagination
-    # ------------------------------------------------------------------
     def paginate(self,
                  url: str,
                  page_param: str = "page",
@@ -193,9 +157,6 @@ class RequestFragmenter:
 
         return responses
 
-    # ------------------------------------------------------------------
-    # 4) Distribution d'URLs
-    # ------------------------------------------------------------------
     def distribute(self,
                    urls: List[str],
                    method: str = "GET",
@@ -223,9 +184,6 @@ class RequestFragmenter:
                 return
             yield chunk
 
-    # ------------------------------------------------------------------
-    # Async
-    # ------------------------------------------------------------------
     async def upload_in_chunks_async(self,
                                      url: str,
                                      payload: Any,
@@ -256,9 +214,6 @@ class RequestFragmenter:
                     results.append({"status": None, "error": str(e)})
         return results
 
-    # ------------------------------------------------------------------
-    # Internes
-    # ------------------------------------------------------------------
     def _build_headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         headers: Dict[str, str] = {}
         if self.ua_rotator is not None:
@@ -273,17 +228,17 @@ class RequestFragmenter:
         return self.proxy_rotator.get_proxy()
 
     def _request_with_retry(self, method: str, url: str, **kwargs) -> Any:
-        """
-        Retry avec backoff. Le timeout est fixé une seule fois.
-        Le proxy est choisi à chaque tentative (rotation).
-        """
+
+        if self.backoff is not None:
+            return self.backoff.request(self.session, method, url, **kwargs)
+
         kwargs.setdefault("timeout", self.timeout)
 
         for attempt in range(self.max_retries):
             try:
-                if self.rate_limiter is not None:
+                if  self.rate_limiter is not None:
                     self.rate_limiter.wait()
-                if self.jitter is not None:
+                if  self.jitter is not None:
                     self.jitter.sleep()
 
                 proxies = kwargs.get("proxies") or self._get_proxies()
@@ -300,18 +255,17 @@ class RequestFragmenter:
                         )
                     if attempt < self.max_retries - 1:
                         delay = (backoff_delay(attempt, jitter="full")
-                                 if backoff_delay else 2 ** attempt)
+                                if backoff_delay else 2 ** attempt)
                         time.sleep(delay)
                         continue
                 return resp
 
             except Exception as e:
-                logger.warning("Tentative %d échouée sur %s : %r",
-                               attempt + 1, url, e)
+                logger.warning("Attempt %d failed on %s: %r", attempt + 1, url, e)
                 if attempt == self.max_retries - 1:
                     return None
                 delay = (backoff_delay(attempt, jitter="full")
-                         if backoff_delay else 2 ** attempt)
+                        if backoff_delay else 2 ** attempt)
                 time.sleep(delay)
         return None
 
