@@ -27,10 +27,6 @@ It ships with a terminal UI (TUI) for interactive control, a CLI for automation,
 
 ## Purpose
 
-Striker exists to answer a specific operational question:
-
-> *"How does my infrastructure behave under stress, and where are my defenses actually effective?"*
-
 The toolkit is built around three pillars:
 
 1. **Resilience testing** — controlled slowloris and connection-exhaustion scenarios against services you own, on isolated networks, to validate timeouts, worker pools, and rate-limiting configurations.
@@ -96,5 +92,4 @@ source venv/bin/activate          # Linux / macOS
 # Install core dependencies
 pip install -r requirements.txt
 
-# (Optional) Install the browser engine for CAPTCHA fallback
-playwright install chromium
+
