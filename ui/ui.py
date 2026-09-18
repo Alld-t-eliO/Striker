@@ -1,24 +1,9 @@
-"""
-ui.py
------
-Interface TUI dédiée au module offensif (slowloris).
-
-Palette :
-  - cyan    : titres, valeurs neutres, bordures principales
-  - violet  : accents secondaires, labels, prompt
-  - vert    : état OK, sockets actives, succès
-  - rouge   : erreurs, bouton arrêt, bandeau critique
-  - jaune   : avertissements, alertes, cible en cours
-"""
-
 from __future__ import annotations
-
 import os
 import threading
 import time
 from pathlib import Path
 from typing import Optional
-
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static, Footer, Input, Label, Button
@@ -26,9 +11,6 @@ from textual.binding import Binding
 from textual.screen import Screen
 
 
-# ─────────────────────────────────────────────────────────────
-#  Constantes
-# ─────────────────────────────────────────────────────────────
 APP_NAME = os.getenv("APP_NAME", "STRIKER")
 VERSION = os.getenv("VERSION", "0.1.0")
 GITHUB_NAME = os.getenv("GITHUB_NAME", "Aegon")
@@ -45,9 +27,6 @@ BANNER = r"""
 """
 
 
-# ─────────────────────────────────────────────────────────────
-#  État partagé avec le module DoS
-# ─────────────────────────────────────────────────────────────
 class OffensiveState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -59,6 +38,8 @@ class OffensiveState:
         self.keepalive_interval: float = 15.0
         self.alive_sockets: int = 0
         self.opened: int = 0
+        self.closed: int = 0
+        self.errors: dict = {}
         self.started_at: Optional[float] = None
         self.last_message: str = ""
         self.last_error: str = ""
@@ -86,9 +67,6 @@ class OffensiveState:
             }
 
 
-# ─────────────────────────────────────────────────────────────
-#  Écran principal (unique)
-# ─────────────────────────────────────────────────────────────
 class MainScreen(Screen):
     BINDINGS = [
         Binding("s", "start", "START"),
@@ -103,8 +81,6 @@ class MainScreen(Screen):
         yield Vertical(
             Static(BANNER, id="banner"),
             Static(f"// OFFENSIVE MODULE   // BY {GITHUB_NAME}   // v{VERSION}", id="byline"),
-
-            # Bandeau d'alerte permanent
             Static(
                 "⚠  MODULE OFFENSIF — SLOWLORIS  ⚠\n"
                 "Utilisation sur cibles autorisées uniquement.\n"
@@ -112,7 +88,6 @@ class MainScreen(Screen):
                 id="warning_banner",
             ),
 
-            # Formulaire de configuration
             Horizontal(
                 Vertical(
                     Label("CIBLE (IP)", classes="field_label"),
@@ -137,7 +112,6 @@ class MainScreen(Screen):
                 id="form_row",
             ),
 
-            # Boutons
             Horizontal(
                 Button("DÉMARRER", id="btn_start", variant="success"),
                 Button("ARRÊTER", id="btn_stop", variant="error"),
@@ -146,10 +120,7 @@ class MainScreen(Screen):
                 id="buttons",
             ),
 
-            # Monitoring live
             Static(self._render_status(), id="live"),
-
-            # Message contextuel
             Static("", id="flash"),
 
             Static(
@@ -163,21 +134,26 @@ class MainScreen(Screen):
         self._dos = None
         self._timer = self.set_interval(0.5, self._refresh)
 
-    # ------------------------------------------------------------------
     def _render_status(self) -> str:
         st = self.app.offensive_state.snapshot()
         state = "RUNNING" if st["running"] else "IDLE"
         uptime = ""
         if st["started_at"] and st["running"]:
             uptime = f"   UPTIME: {int(time.time() - st['started_at'])}s"
+
+        errors = st.get("errors", {}) or {}
+        errors_str = " ".join(f"{k}={v}" for k, v in sorted(errors.items())) or "none"
+
         return (
-            "┌─[ ÉTAT ]────────────────────────────────────────────┐\n"
-            f"│  STATUT         : {state}{uptime}\n"
-            f"│  CIBLE          : {st['target']}:{st['port']}\n"
-            f"│  THREADS        : {st['threads']}\n"
-            f"│  SOCKETS/THREAD : {st['sockets_per_thread']}\n"
-            f"│  SOCKETS VIVES  : {st['alive_sockets']}\n"
-            f"│  OUVERTES       : {st['opened']}\n"
+            "┌─[ STATUS ]──────────────────────────────────────────┐\n"
+            f"│  STATE         : {state}{uptime}\n"
+            f"│  TARGET        : {st['target']}:{st['port']}\n"
+            f"│  THREADS       : {st['threads']}\n"
+            f"│  SOCKETS/WORKER: {st['sockets_per_thread']}\n"
+            f"│  ALIVE         : {st['alive_sockets']}\n"
+            f"│  OPENED        : {st['opened']}\n"
+            f"│  CLOSED        : {st['closed']}\n"
+            f"│  ERRORS        : {errors_str}\n"
             "└─────────────────────────────────────────────────────┘"
         )
 
@@ -188,6 +164,8 @@ class MainScreen(Screen):
                 self.app.offensive_state.update(
                     alive_sockets=s["alive_sockets"],
                     opened=s["opened"],
+                    closed=s["closed"],
+                    errors=s.get("errors", {}),
                 )
                 if not s["running"]:
                     self.app.offensive_state.update(running=False)
@@ -255,7 +233,7 @@ class MainScreen(Screen):
                 target_ip=form["target"],
                 target_port=form["port"],
                 threads=form["threads"],
-                sockets_per_thread=form["sockets_per_thread"],
+                sockets_per_worker=form["sockets_per_thread"],
                 keepalive_interval=form["keepalive_interval"],
             )
             self._dos.run()
