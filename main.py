@@ -3,13 +3,13 @@ import argparse
 import logging
 import time
 from typing import Any, Dict, Iterable, List, Optional
-from core.proxy_rotator import ProxyRotator
-from core.user_agent_rotator import UserAgentRotator
-from core.delay_jitter import DelayJitter, RateLimiter
-from core.adaptive_backoff import AdaptiveBackoff
-from core.request_fragmenter import RequestFragmenter
-from core.captcha_waf_bypass import CaptchaWafBypass
-from core.distributed_bots import DistributedBotPool, BotContext, Task
+from proxy.proxy_rotator import ProxyRotator
+from identity.user_agent_rotator import UserAgentRotator
+from policies.delay_jitter import DelayJitter, RateLimiter
+from policies.adaptive_backoff import AdaptiveBackoff
+from scraping.request_fragmenter import RequestFragmenter
+from protection_bypass.captcha_waf_bypass import CaptchaWafBypass
+from workers.distributed_bots import DistributedBotPool, BotContext, Task
 
 
 logger = logging.getLogger("app")
