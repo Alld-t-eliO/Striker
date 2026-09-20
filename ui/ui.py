@@ -61,6 +61,8 @@ class OffensiveState:
                 "keepalive_interval": self.keepalive_interval,
                 "alive_sockets": self.alive_sockets,
                 "opened": self.opened,
+                "closed": self.closed,
+                "errors": self.errors.copy(),
                 "started_at": self.started_at,
                 "last_message": self.last_message,
                 "last_error": self.last_error,
@@ -177,7 +179,6 @@ class MainScreen(Screen):
         except Exception:
             pass
 
-    # ------------------------------------------------------------------
     def _read_form(self) -> dict:
         def _int(wid: str, default: int) -> int:
             try:
@@ -199,7 +200,6 @@ class MainScreen(Screen):
             "keepalive_interval": _float("#inp_interval", 15.0),
         }
 
-    # ------------------------------------------------------------------
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = event.button.id
         if bid == "btn_start":
@@ -212,10 +212,8 @@ class MainScreen(Screen):
             self.action_quit_app()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        # Entrée dans un champ = démarrer
         self.action_start()
 
-    # ------------------------------------------------------------------
     def action_start(self) -> None:
         form = self._read_form()
         if not form["target"]:
@@ -223,7 +221,7 @@ class MainScreen(Screen):
             return
 
         try:
-            from core.ddos import Dos  # import paresseux
+            from application.dos import Dos  
         except ImportError as e:
             self._flash(f"ERREUR import : {e}", level="error")
             return
@@ -281,16 +279,10 @@ class MainScreen(Screen):
         self.action_stop()
         self.app.exit()
 
-    # ------------------------------------------------------------------
     def _flash(self, message: str, level: str = "info") -> None:
-        """
-        Affiche un message contextuel coloré selon `level`.
-        level : 'ok' | 'warn' | 'error' | 'info'
-        """
         try:
             widget = self.query_one("#flash", Static)
             widget.update(message)
-            # Classes CSS pour la couleur
             widget.remove_class("flash-ok", "flash-warn",
                                 "flash-error", "flash-info")
             widget.add_class(f"flash-{level}")
@@ -298,9 +290,6 @@ class MainScreen(Screen):
             pass
 
 
-# ─────────────────────────────────────────────────────────────
-#  App
-# ─────────────────────────────────────────────────────────────
 class StrikerTUI(App):
     CSS_PATH = CSS_PATH
     TITLE = "STRIKER"
