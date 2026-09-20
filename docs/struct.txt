@@ -1,23 +1,40 @@
 Striker/
-├── core/
-│   ├── __init__.py
-│   ├── adaptive_backoff.py       
-│   ├── captcha_solvers.py        
-│   ├── captcha_waf_bypass.py     
-│   ├── delay_jitter.py
-│   ├── distributed_bots.py       
-│   ├── dos.py                    
-│   ├── protection_detector.py   
-│   ├── proxy_rotator.py          
-│   ├── request_fragmenter.py    
-│   ├── settings.py
-│   ├── stealth_browser.py        
-│   └── user_agent_rotator.py
-├── ui/
-│   ├── __init__.py
-│   ├── tui.tcss
-│   └── ui.py                     
-├── main.py                    
-├── requirements.txt
+├── application
+│   ├── __init__.py
+│   ├── dos.py
+│   └── dos_http.py
+├── config
+│   ├── __init__.py
+│   └── settings.py
+├── docs
+│   ├── README.md
+│   ├── requirements.txt
+│   └── struct.txt
+├── identity
+│   └── user_agent_rotator.py
 ├── install.sh
-└── README.md
+├── main.py
+├── network
+│   └── stealth_browser.py
+├── policies
+│   ├── adaptive_backoff.py
+│   └── delay_jitter.py
+├── protection_bypass
+│   ├── .DS_Store
+│   ├── __init__.py
+│   ├── captcha_solvers.py
+│   ├── captcha_waf_bypass.py
+│   └── protection_detector.py
+├── proxy
+│   ├── __init__.py
+│   └── proxy_rotator.py
+├── scraping
+│   └── request_fragmenter.py
+├── ui
+│   ├── .DS_Store
+│   ├── cli.py
+│   ├── config.py
+│   └── ui.py
+└── workers
+    ├── __init__.py
+    └── distributed_bots.py
