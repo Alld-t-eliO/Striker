@@ -9,8 +9,7 @@ from policies.delay_jitter import DelayJitter, RateLimiter
 from policies.adaptive_backoff import AdaptiveBackoff
 from scraping.request_fragmenter import RequestFragmenter
 from protection_bypass.captcha_waf_bypass import CaptchaWafBypass
-from workers.distributed_bots import DistributedBotPool, BotContext, Task
-
+from workers.distributed_bots import WorkerPool, BotContext, Task
 
 logger = logging.getLogger("app")
 if not logger.handlers:
@@ -106,7 +105,7 @@ class ScrapingStack:
                    progress_every: float = 5.0) -> Dict[str, Any]:
         if handler is None:
             handler = _default_scraping_handler
-        pool = DistributedBotPool(
+        pool = WorkerPool(
             tasks=list(urls), handler=handler, num_workers=workers,
             shard_by=shard_by, proxy_rotator=self.proxy_rotator,
             ua_rotator=self.ua_rotator, jitter=self.jitter,
@@ -163,7 +162,7 @@ def _default_scraping_handler(task: Task, ctx: BotContext) -> Dict[str, Any]:
 
 
 def _run_dos(args) -> None:
-    from core.ddos import Dos
+    from application.dos import Dos
     dos = Dos(
         target_ip=args.host,
         target_port=args.port,
